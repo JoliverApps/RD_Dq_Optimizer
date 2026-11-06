@@ -278,6 +278,7 @@ def check_full_signed_profile(app, folder):
 
 def check_gui(app, db_path, result):
     import tkinter as tk
+    import traceback
     from tkinter import filedialog, messagebox, ttk
 
     original_tk = tk.Tk
@@ -287,7 +288,8 @@ def check_gui(app, db_path, result):
     completed = []
     # A user-created fixture tests switching sets without adding another default.
     fixtures = app.PrescriptionStore(db_path, app.DEFAULT_SETS)
-    fixtures.save_set("Verification — saved set", 2.0, [("Reference", 20, 10), ("Schedule", 12, 3)])
+    fixture_rows = [(f"Schedule {i}", 20 + i, 10 + i) for i in range(15)]
+    fixtures.save_set("Verification — saved set", 2.0, fixture_rows)
 
     def fail_dialog(title, message, **_kwargs):
         raise RuntimeError(str(title) + ": " + str(message))
@@ -307,22 +309,63 @@ def check_gui(app, db_path, result):
 
         def exercise():
             try:
-                buttons = [w for w in children(root) if isinstance(w, ttk.Button)]
+                from unittest.mock import patch
 
-                def button(text):
-                    return next(w for w in buttons if str(w.cget("text")) == text)
+                def button(text, parent=None):
+                    return next(
+                        w
+                        for w in children(parent or root)
+                        if isinstance(w, ttk.Button) and str(w.cget("text")) == text
+                    )
 
-                trees = [w for w in children(root) if isinstance(w, ttk.Treeview)]
-                prescriptions = next(w for w in trees if "include" in w.cget("columns"))
-                results = next(w for w in trees if "dq" in w.cget("columns"))
-                ab_entry = next(
+                notebook = next(
                     w
                     for w in children(root)
-                    if isinstance(w, ttk.Entry) and w.master == button("Save α/β").master
+                    if isinstance(w, ttk.Notebook)
+                    and isinstance(w.master, ttk.LabelFrame)
+                    and w.master.cget("text") == "Prescriptions in the viewed set"
                 )
-                optimize = next(w for w in buttons if str(w.cget("text")) == "Run optimization")
+
+                def view(name):
+                    page = next(tab for tab in notebook.tabs() if notebook.tab(tab, "text") == name)
+                    notebook.select(page)
+                    notebook.event_generate("<<NotebookTabChanged>>")
+                    frame = root.nametowidget(page)
+                    tree = next(w for w in children(frame) if isinstance(w, ttk.Treeview))
+                    ab_entry = next(
+                        w
+                        for w in children(frame)
+                        if isinstance(w, ttk.Entry) and w.master == button("Save α/β", frame).master
+                    )
+                    return frame, tree, ab_entry
+
+                def set_checkbox(name):
+                    return next(
+                        w
+                        for w in children(root)
+                        if isinstance(w, ttk.Checkbutton)
+                        and w.cget("textvariable")
+                        and str(root.getvar(w.cget("textvariable"))).split("\n")[0] == name
+                    )
+
+                results = next(
+                    w
+                    for w in children(root)
+                    if isinstance(w, ttk.Treeview) and "dq" in w.cget("columns")
+                )
+                step_entry = next(
+                    w
+                    for w in children(root)
+                    if isinstance(w, ttk.Entry)
+                    and isinstance(w.master, ttk.LabelFrame)
+                    and w.master.cget("text") == "RD EQD2 optimization settings"
+                    and w.grid_info().get("column") == 2
+                )
+                root.setvar(step_entry.cget("textvariable"), "0.05")
+                optimize = button("Run optimization")
+                assert len(notebook.tabs()) == 1
+                frame, prescriptions, ab_entry = view(app.PROSTATE_SET_NAME)
                 root.update_idletasks()
-                # Exercise the actual checkbox mouse binding.
                 x, y, width, height = prescriptions.bbox("0", "#1")
                 prescriptions.event_generate("<Button-1>", x=x + width // 2, y=y + height // 2)
                 assert prescriptions.set("0", "include") == "☐"
@@ -331,16 +374,52 @@ def check_gui(app, db_path, result):
                 row = results.item(results.get_children()[0], "values")
                 assert int(row[1]) == 7 and float(row[2]) == 2.2
 
-                selector = next(w for w in children(root) if isinstance(w, ttk.Menubutton))
-                menu = root.nametowidget(selector.cget("menu"))
-                choices = {menu.entrycget(i, "label"): i for i in range(menu.index("end") + 1)}
-                other = choices["Verification — saved set"]
-                menu.invoke(other)
-                assert float(ab_entry.get()) == 2.0
-                menu.invoke(choices[app.PROSTATE_SET_NAME])
+                other_name = "Verification — saved set"
+                set_checkbox(other_name).invoke()
+                assert len(notebook.tabs()) == 2
+                other_frame, other_tree, other_ab = view(other_name)
+                assert len(other_tree.get_children()) == 15 and float(other_ab.get()) == 2.0
+                root.setvar(other_ab.cget("textvariable"), "3.1")
+                root.update_idletasks()
+                x, y, width, height = other_tree.bbox("0", "#1")
+                other_tree.event_generate("<Button-1>", x=x + width // 2, y=y + height // 2)
+                assert other_tree.set("0", "include") == "☐"
+                optimize.invoke()
+                rows_before = [results.item(item, "values") for item in results.get_children()]
+                assert len(rows_before) == 2
+                # Switching tabs must reuse widgets and avoid database reads or result invalidation.
+                with patch.object(
+                    app.PrescriptionStore,
+                    "get_set",
+                    side_effect=AssertionError("A tab switch loaded the database"),
+                ):
+                    for _ in range(3):
+                        shown, tree, entry = view(app.PROSTATE_SET_NAME)
+                        assert shown is frame and tree is prescriptions
+                        assert float(entry.get()) == 2.2 and tree.set("0", "include") == "☐"
+                        shown, tree, entry = view(other_name)
+                        assert shown is other_frame and tree is other_tree
+                        assert float(entry.get()) == 3.1 and tree.set("0", "include") == "☐"
+                assert rows_before == [
+                    results.item(item, "values") for item in results.get_children()
+                ]
+
+                set_checkbox(other_name).invoke()
+                assert len(notebook.tabs()) == 1
+                set_checkbox(other_name).invoke()
+                _, other_tree, other_ab = view(other_name)
+                assert float(other_ab.get()) == 3.1 and other_tree.set("0", "include") == "☐"
+                button("Clear all sets").invoke()
+                assert not notebook.tabs()
+                button("Select all sets").invoke()
+                assert len(notebook.tabs()) == 2
+                _, other_tree, other_ab = view(other_name)
+                assert float(other_ab.get()) == 3.1 and other_tree.set("0", "include") == "☐"
+                set_checkbox(other_name).invoke()
+                frame, prescriptions, ab_entry = view(app.PROSTATE_SET_NAME)
                 assert float(ab_entry.get()) == 2.2 and prescriptions.set("0", "include") == "☐"
 
-                button("Save α/β").invoke()
+                button("Save α/β", frame).invoke()
                 saved = app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)
                 assert saved["alpha_beta"] == 2.2 and len(saved["prescriptions"]) == 8
                 export_path = Path(db_path).with_name("gui-export.csv")
@@ -354,12 +433,12 @@ def check_gui(app, db_path, result):
                     "Analysis window did not open"
                 )
                 for text in ("Plot settings…", "Export image…"):
-                    next(w for w in buttons if str(w.cget("text")) == text).invoke()
+                    button(text).invoke()
                 root.setvar(ab_entry.cget("textvariable"), "-2")
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
                 assert float(row[2]) == 2
-                button("Save α/β").invoke()
+                button("Save α/β", frame).invoke()
                 assert (
                     app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)["alpha_beta"]
                     == 2
@@ -371,7 +450,7 @@ def check_gui(app, db_path, result):
                     raise RuntimeError("; ".join(failures))
                 completed.append(True)
             except Exception as error:
-                failures.append(str(error))
+                failures.append(f"{type(error).__name__}: {error}\n" + traceback.format_exc())
             finally:
                 root.destroy()
 

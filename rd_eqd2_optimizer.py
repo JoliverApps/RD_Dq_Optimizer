@@ -2436,15 +2436,7 @@ def launch_gui(db_path=None):
 
     setbox = ttk.LabelFrame(panel, text="Prescriptions sets — select sets to optimize", padding=8)
     setbox.pack(fill="x", pady=(8, 4))
-    tools = ttk.Frame(setbox)
-    tools.pack(fill="x", pady=(0, 5))
-    ttk.Label(tools, text="View prescriptions set:").pack(side="left", padx=(0, 6))
     focused = tk.StringVar()
-    focused_label = tk.StringVar(value="Choose a prescriptions set ▾")
-    selector = ttk.Menubutton(tools, textvariable=focused_label, width=45)
-    selector.pack(side="left", padx=(0, 10))
-    menu = tk.Menu(selector, tearoff=False)
-    selector["menu"] = menu
     management_actions = ttk.Frame(setbox)
     management_actions.pack(fill="x", pady=(0, 5))
     for index, (label, command) in enumerate(
@@ -2461,7 +2453,7 @@ def launch_gui(db_path=None):
         )
     ttk.Label(
         setbox,
-        text="Choose sets on the left, then check the prescriptions to include in optimization and set export.",
+        text="Select sets on the left, then use their tabs to choose prescriptions for optimization and export.",
     ).pack(anchor="w")
 
     selection_panes = ttk.Panedwindow(setbox, orient="horizontal")
@@ -2503,55 +2495,18 @@ def launch_gui(db_path=None):
         ),
     )
 
-    ab_bar = ttk.Frame(prescription_list)
-    ab_bar.pack(fill="x", pady=(0, 5))
-    ttk.Label(ab_bar, text="|α/β| (Gy)").pack(side="left", padx=(0, 6))
-    main_ab = tk.StringVar()
-    main_ab_entry = ttk.Entry(ab_bar, textvariable=main_ab, width=12)
-    main_ab_entry.pack(side="left")
-    save_ab_button = ttk.Button(ab_bar, text="Save α/β", command=lambda: save_main_alpha_beta())
-    save_ab_button.pack(side="left", padx=(6, 14))
-    ttk.Button(
-        ab_bar, text="Select all prescriptions", command=lambda: select_prescriptions(True)
-    ).pack(side="left", padx=3)
-    ttk.Button(
-        ab_bar, text="Clear prescriptions", command=lambda: select_prescriptions(False)
-    ).pack(side="left", padx=3)
-    details_summary = tk.StringVar(value="No prescriptions")
-    ttk.Label(prescription_list, textvariable=details_summary).pack(anchor="w", pady=(0, 5))
-    details_area = ttk.Frame(prescription_list)
-    details_area.pack(fill="both", expand=True)
-    details_tree = ttk.Treeview(
-        details_area, columns=("include", "name", "D", "n", "d"), show="headings", height=8
+    prescription_tabs = ttk.Notebook(prescription_list)
+    prescription_tabs.enable_traversal()
+    prescription_tabs.pack(fill="both", expand=True)
+    empty_prescriptions = ttk.Label(
+        prescription_list, text="Select a prescriptions set to view its prescriptions."
     )
-    for column, heading, width in [
-        ("include", "Optimize", 70),
-        ("name", "Prescription name", 350),
-        ("D", "D (Gy)", 85),
-        ("n", "n", 60),
-        ("d", "d (Gy/fraction)", 115),
-    ]:
-        details_tree.heading(column, text=heading)
-        details_tree.column(
-            column,
-            width=width,
-            minwidth=60,
-            stretch=(column == "name"),
-            anchor="w" if column == "name" else "center",
-        )
-    details_scroll = ttk.Scrollbar(details_area, orient="vertical", command=details_tree.yview)
-    details_hscroll = ttk.Scrollbar(details_area, orient="horizontal", command=details_tree.xview)
-    details_tree.configure(yscrollcommand=details_scroll.set, xscrollcommand=details_hscroll.set)
-    details_tree.grid(row=0, column=0, sticky="nsew")
-    details_scroll.grid(row=0, column=1, sticky="ns")
-    details_hscroll.grid(row=1, column=0, sticky="ew")
-    details_area.columnconfigure(0, weight=1)
-    details_area.rowconfigure(0, weight=1)
+    tab_views = {}
     dataset_cache = {}
     enabled_vars = {}
     set_labels = {}
     selections = PrescriptionsSelection()
-    loading_ab = False
+    syncing_tabs = False
     result_holder = {"result": None, "analysis_window": None}
 
     bar = ttk.Frame(panel)
@@ -2869,61 +2824,53 @@ def launch_gui(db_path=None):
             f"{full['name']}\n|α/β| = {ab} Gy · {count}/{len(full['prescriptions'])} selected"
         )
 
-    def refresh_prescriptions():
-        key = focused.get()
-        if key not in dataset_cache:
+    def refresh_prescriptions(key):
+        if key not in dataset_cache or key not in tab_views:
             return
-        full = dataset_cache[key]
-        selected = details_tree.selection()
-        visible = details_tree.yview()[0]
-        details_tree.delete(*details_tree.get_children())
+        full, view = dataset_cache[key], tab_views[key]
+        tree = view["tree"]
+        selected = tree.selection()
+        visible = tree.yview()[0]
+        tree.delete(*tree.get_children())
         for index, (name, total, fx) in enumerate(full["prescriptions"]):
             checked = selections.is_included(full, index)
-            details_tree.insert(
+            tree.insert(
                 "",
                 "end",
                 iid=str(index),
                 values=("☑" if checked else "☐", name, f"{total:g}", fx, f"{total / fx:.4g}"),
             )
-        details_tree.selection_set([row for row in selected if details_tree.exists(row)])
-        details_tree.yview_moveto(visible)
-        details_summary.set(
+        tree.selection_set([row for row in selected if tree.exists(row)])
+        tree.yview_moveto(visible)
+        view["summary"].set(
             f"{len(selections.selected_rows(full))} of {len(full['prescriptions'])} prescriptions selected · at least two required"
         )
         refresh_set_label(key)
 
     def view_set(set_id):
-        """View a set, restoring its own prescription choices and alpha/beta draft."""
-        nonlocal loading_ab
         key = str(set_id)
-        if key not in dataset_cache:
-            return
-        focused.set(key)
-        full = dataset_cache[key]
-        focused_label.set(full["name"] + " ▾")
-        loading_ab = True
-        try:
-            main_ab_entry.configure(state="normal")
-            save_ab_button.configure(state="normal")
-            main_ab.set(selections.alpha_beta_text[key])
-        finally:
-            loading_ab = False
-        refresh_prescriptions()
+        if key in tab_views:
+            focused.set(key)
+            if prescription_tabs.select() != str(tab_views[key]["frame"]):
+                prescription_tabs.select(tab_views[key]["frame"])
 
-    def alpha_beta_changed(*_args):
-        key = focused.get()
-        if loading_ab or key not in dataset_cache:
+    def prescription_tab_changed(_event=None):
+        selected = prescription_tabs.select()
+        key = next((key for key, view in tab_views.items() if str(view["frame"]) == selected), "")
+        focused.set(key)
+
+    def alpha_beta_changed(key):
+        if syncing_tabs or key not in dataset_cache or key not in tab_views:
             return
-        selections.alpha_beta_text[key] = main_ab.get()
+        selections.alpha_beta_text[key] = tab_views[key]["ab"].get()
         refresh_set_label(key)
         invalidate_result()
 
-    def save_main_alpha_beta():
-        key = focused.get()
-        if key not in dataset_cache:
+    def save_main_alpha_beta(key):
+        if key not in dataset_cache or key not in tab_views:
             return
         try:
-            ab = store.update_alpha_beta(int(key), main_ab.get())
+            ab = store.update_alpha_beta(int(key), tab_views[key]["ab"].get())
         except (ValueError, KeyError, sqlite3.Error) as exc:
             messagebox.showerror("Cannot save α/β", str(exc), parent=root)
             return
@@ -2932,37 +2879,122 @@ def launch_gui(db_path=None):
             f"Saved |α/β| = {ab:g} Gy for {dataset_cache[key]['name']}. Run optimization to update results."
         )
 
-    def select_prescriptions(value):
-        key = focused.get()
+    def select_prescriptions(value, key):
         if key not in dataset_cache:
             return
         full = dataset_cache[key]
         selections.set_included(full, range(len(full["prescriptions"])), value)
-        refresh_prescriptions()
+        refresh_prescriptions(key)
         invalidate_result()
 
-    def toggle_prescriptions(indices):
-        key = focused.get()
+    def toggle_prescriptions(indices, key):
         if key not in dataset_cache or not indices:
             return
         full = dataset_cache[key]
         include = not all(selections.is_included(full, index) for index in indices)
         selections.set_included(full, indices, include)
-        refresh_prescriptions()
+        refresh_prescriptions(key)
         invalidate_result()
 
-    def prescription_click(event):
-        row = details_tree.identify_row(event.y)
-        if row and details_tree.identify_column(event.x) == "#1":
-            details_tree.focus(row)
-            details_tree.selection_set(row)
-            details_tree.focus_set()
-            toggle_prescriptions([int(row)])
+    def prescription_click(event, key):
+        tree = event.widget
+        row = tree.identify_row(event.y)
+        if row and tree.identify_column(event.x) == "#1":
+            tree.focus(row)
+            tree.selection_set(row)
+            tree.focus_set()
+            toggle_prescriptions([int(row)], key)
             return "break"
 
-    def prescription_space(_event):
-        toggle_prescriptions([int(row) for row in details_tree.selection()])
+    def prescription_space(event, key):
+        toggle_prescriptions([int(row) for row in event.widget.selection()], key)
         return "break"
+
+    def create_set_tab(key):
+        frame = ttk.Frame(prescription_tabs, padding=(4, 6))
+        ab_bar = ttk.Frame(frame)
+        ab_bar.pack(fill="x", pady=(0, 5))
+        ttk.Label(ab_bar, text="|α/β| (Gy)").pack(side="left", padx=(0, 6))
+        ab = tk.StringVar(value=selections.alpha_beta_text[key])
+        ttk.Entry(ab_bar, textvariable=ab, width=12).pack(side="left")
+        ttk.Button(ab_bar, text="Save α/β", command=lambda: save_main_alpha_beta(key)).pack(
+            side="left", padx=(6, 14)
+        )
+        ttk.Button(
+            ab_bar, text="Select all prescriptions", command=lambda: select_prescriptions(True, key)
+        ).pack(side="left", padx=3)
+        ttk.Button(
+            ab_bar, text="Clear prescriptions", command=lambda: select_prescriptions(False, key)
+        ).pack(side="left", padx=3)
+        summary = tk.StringVar()
+        ttk.Label(frame, textvariable=summary).pack(anchor="w", pady=(0, 5))
+        details_area = ttk.Frame(frame)
+        details_area.pack(fill="both", expand=True)
+        tree = ttk.Treeview(
+            details_area, columns=("include", "name", "D", "n", "d"), show="headings", height=8
+        )
+        for column, heading, width in [
+            ("include", "Optimize", 70),
+            ("name", "Prescription name", 350),
+            ("D", "D (Gy)", 85),
+            ("n", "n", 60),
+            ("d", "d (Gy/fraction)", 115),
+        ]:
+            tree.heading(column, text=heading)
+            tree.column(
+                column,
+                width=width,
+                minwidth=60,
+                stretch=(column == "name"),
+                anchor="w" if column == "name" else "center",
+            )
+        vertical = ttk.Scrollbar(details_area, orient="vertical", command=tree.yview)
+        horizontal = ttk.Scrollbar(details_area, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        details_area.columnconfigure(0, weight=1)
+        details_area.rowconfigure(0, weight=1)
+        tree.bind("<Button-1>", lambda event: prescription_click(event, key))
+        tree.bind("<space>", lambda event: prescription_space(event, key))
+        tab_views[key] = {"frame": frame, "ab": ab, "summary": summary, "tree": tree}
+        ab.trace_add("write", lambda *_args: alpha_beta_changed(key))
+        prescription_tabs.add(frame, text=dataset_cache[key]["name"])
+        refresh_prescriptions(key)
+
+    def sync_prescription_tabs(prefer_id=None, refresh=False):
+        nonlocal syncing_tabs
+        selected_keys = [key for key, var in enabled_vars.items() if var.get()]
+        old_focus = focused.get()
+        syncing_tabs = True
+        try:
+            for key in list(tab_views):
+                if key not in selected_keys:
+                    frame = tab_views.pop(key)["frame"]
+                    prescription_tabs.forget(frame)
+                    frame.destroy()
+            for index, key in enumerate(selected_keys):
+                if key not in tab_views:
+                    create_set_tab(key)
+                elif refresh:
+                    tab_views[key]["ab"].set(selections.alpha_beta_text[key])
+                    refresh_prescriptions(key)
+                prescription_tabs.tab(tab_views[key]["frame"], text=dataset_cache[key]["name"])
+                prescription_tabs.insert(index, tab_views[key]["frame"])
+            if selected_keys:
+                empty_prescriptions.pack_forget()
+                prescription_tabs.pack(fill="both", expand=True)
+                preferred = str(prefer_id) if prefer_id is not None else old_focus
+                view_set(preferred if preferred in selected_keys else selected_keys[0])
+            else:
+                focused.set("")
+                prescription_tabs.pack_forget()
+                empty_prescriptions.pack(anchor="w", padx=6, pady=12)
+        finally:
+            syncing_tabs = False
+
+    prescription_tabs.bind("<<NotebookTabChanged>>", prescription_tab_changed)
 
     def export_set_csv():
         key = focused.get()
@@ -2995,12 +3027,13 @@ def launch_gui(db_path=None):
         )
 
     def set_enabled_changed(key):
-        view_set(key)
+        sync_prescription_tabs(prefer_id=key if enabled_vars[key].get() else None)
         invalidate_result()
 
     def set_all_checks(value):
         for var in enabled_vars.values():
             var.set(value)
+        sync_prescription_tabs()
         invalidate_result()
 
     def reveal_set(event):
@@ -3018,7 +3051,6 @@ def launch_gui(db_path=None):
     bind_scrolling(check_items, selection_canvas)
 
     def refresh_sets(prefer_id=None, enable_new=False):
-        nonlocal loading_ab
         previous_checks = {key: var.get() for key, var in enabled_vars.items()}
         old_focus = focused.get()
         for child in check_items.winfo_children():
@@ -3026,18 +3058,11 @@ def launch_gui(db_path=None):
         dataset_cache.clear()
         enabled_vars.clear()
         set_labels.clear()
-        menu.delete(0, "end")
         records = [store.get_set(record["id"]) for record in store.list_sets()]
         selections.sync(records)
         for full in records:
             key = str(full["id"])
             dataset_cache[key] = full
-            menu.add_radiobutton(
-                label=full["name"],
-                variable=focused,
-                value=key,
-                command=lambda key=key: view_set(key),
-            )
             checked = previous_checks.get(key, False)
             if enable_new and str(prefer_id) == key:
                 checked = True
@@ -3056,31 +3081,9 @@ def launch_gui(db_path=None):
             button.pack(anchor="w", padx=4, pady=4)
             bind_scrolling(button, selection_canvas)
             button.bind("<FocusIn>", reveal_set)
-        if dataset_cache:
-            default = next(
-                (key for key, data in dataset_cache.items() if data["name"] == PROSTATE_SET_NAME),
-                next(iter(dataset_cache)),
-            )
-            choice = (
-                str(prefer_id)
-                if prefer_id is not None and str(prefer_id) in dataset_cache
-                else old_focus
-                if old_focus in dataset_cache
-                else default
-            )
-            view_set(choice)
-        else:
-            focused.set("")
-            focused_label.set("No saved prescriptions sets ▾")
-            details_summary.set("No prescriptions")
-            details_tree.delete(*details_tree.get_children())
-            loading_ab = True
-            try:
-                main_ab.set("")
-                main_ab_entry.configure(state="disabled")
-                save_ab_button.configure(state="disabled")
-            finally:
-                loading_ab = False
+        sync_prescription_tabs(
+            prefer_id=prefer_id if prefer_id is not None else old_focus, refresh=True
+        )
         invalidate_result()
 
     def import_set_csv():
@@ -3492,9 +3495,6 @@ def launch_gui(db_path=None):
     methods.bind("<<ComboboxSelected>>", method_changed)
     for var in (var_start, var_end, var_step, var_bound_pct):
         var.trace_add("write", invalidate_result)
-    main_ab.trace_add("write", alpha_beta_changed)
-    details_tree.bind("<Button-1>", prescription_click)
-    details_tree.bind("<space>", prescription_space)
     refresh_sets()
     root.mainloop()
 

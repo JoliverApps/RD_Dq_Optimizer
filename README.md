@@ -29,12 +29,12 @@ python rd_eqd2_optimizer.py
 ## Run an optimization
 
 1. Select the prescriptions sets to analyze.
-2. Choose a set to view its prescriptions. Check the **Optimize** boxes for the prescriptions to include. Each selected set needs at least two prescriptions.
+2. Open a selected set's tab in **Prescriptions in the viewed set**. Check the **Optimize** boxes for the prescriptions to include. Each selected set needs at least two prescriptions.
 3. Enter **|α/β| (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
 4. Set **q start**, **q end**, and **q step**, then choose a minimization criterion.
 5. Click **Run optimization**.
 
-Each selected set is optimized independently. Prescription checkboxes control the current analysis; they do not delete saved prescriptions.
+Each selected set has its own tab, prescription choices, and α/β entry. Switching tabs preserves these choices. Each set is optimized independently. Prescription checkboxes control the current analysis; they do not delete saved prescriptions.
 
 ### Parameters and search interval
 
