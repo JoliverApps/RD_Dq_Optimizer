@@ -24,7 +24,12 @@ from pathlib import Path
 import numpy as np
 import sympy as sp
 
-# Symbolically define the published therapeutic-range relationship.
+# Dose is expressed in Gy. The reference fraction size defines EQD2.
+REFERENCE_DOSE_GY = 2.0
+_SERIES_THRESHOLD = 1e-2
+_DIRECT_Q_FRACTION = 0.25
+
+# Symbolic signed-RD reconstruction and cumulative-hazard ratio.
 AB = sp.symbols("alpha_over_beta", positive=True, real=True)
 Q = sp.symbols("D_q", real=True)
 D, N = sp.symbols("d n", positive=True, real=True)
@@ -39,13 +44,23 @@ def _symbolic_fraction_effect(dose):
 
 EQD2_EXPR = sp.Piecewise(
     (N * D, sp.Eq(Q, 0) & sp.Ne(AB, 0)),
-    (2 * N * _symbolic_fraction_effect(D) / _symbolic_fraction_effect(sp.Integer(2)), True),
+    (
+        sp.Integer(REFERENCE_DOSE_GY)
+        * N
+        * _symbolic_fraction_effect(D)
+        / _symbolic_fraction_effect(sp.Integer(REFERENCE_DOSE_GY)),
+        True,
+    ),
 )
 _EQD2_SYMBOLIC_FN = sp.lambdify((AB, Q, D, N), EQD2_EXPR, modules="numpy")
 
 
 def EQD2_FN(ab, q, d, n):
-    """Evaluate the RD expression with stable arithmetic and the zero-q limit."""
+    """Return EQD2 = d0*n*F(d)/F(d0), with F=H/k and d0=2 Gy.
+
+    ``ab`` is the positive-q reference α/β; the signed value is selected from q.
+    Inputs broadcast with NumPy. At q=0, the linear law gives EQD2=n*d.
+    """
     ab, q, d, n = np.broadcast_arrays(*[np.asarray(x, dtype=float) for x in (ab, q, d, n)])
     if np.any(~np.isfinite(ab)) or np.any(ab <= 0):
         raise ValueError("Enter a positive finite α/β value for the q ≥ 0 branch.")
@@ -56,8 +71,10 @@ def EQD2_FN(ab, q, d, n):
         selected = ab == input_ab
         branch_ab, reserve, rates = _signed_rd_parameters(float(input_ab), q[selected])
         effect = _fraction_effect_values(q[selected], branch_ab, reserve, rates, d[selected])
-        reference = _fraction_effect_values(q[selected], branch_ab, reserve, rates, 2.0)
-        result[selected] = (effect / reference) * (2 * n[selected])
+        reference = _fraction_effect_values(
+            q[selected], branch_ab, reserve, rates, REFERENCE_DOSE_GY
+        )
+        result[selected] = (effect / reference) * (REFERENCE_DOSE_GY * n[selected])
     return result.item() if result.ndim == 0 else result
 
 
@@ -78,7 +95,7 @@ PROSTATE_PRESCRIPTIONS = [
 ]
 DEFAULT_Q_START, DEFAULT_Q_END, DEFAULT_Q_STEP = -50.0, 50.0, 0.001
 
-# The sole built-in default; other prescriptions sets are saved or imported by the user.
+# Prescription sets available on first launch.
 DEFAULT_SETS = {
     PROSTATE_SET_NAME: {
         "alpha_beta": PROSTATE_ALPHA_BETA,
@@ -320,13 +337,26 @@ def validate_schedules(schedules):
     return out
 
 
+def _branch_alpha_beta(ab, q):
+    """Select a=ab for q>=0 and a=-ab for q<0.
+
+    The q=0 value records the selected reference; the linear law has β=0,
+    so its physical α/β is undefined and is not used in reconstruction.
+    """
+    return np.where(np.asarray(q) < 0, -ab, ab)
+
+
 def _signed_rd_parameters(ab, qgrid):
-    """Apply q's sign to α/β, reconstruct r, then calculate s=r/q."""
+    """Reconstruct signed a, r=(sqrt(q²+2qa)-q)/a, and s=r/q.
+
+    For q>0, 0<r<1; for q<0, r<0. Both nonzero branches have s>0.
+    At q=0, r=0 and s is undetermined (NaN). Rates have units Gy⁻¹.
+    """
     ab = validated_alpha_beta(ab)
     qgrid = np.asarray(qgrid, dtype=float)
     if qgrid.size == 0 or np.any(~np.isfinite(qgrid)):
         raise ValueError("All candidate q values must be finite.")
-    branch_ab = np.where(qgrid < 0, -ab, ab)
+    branch_ab = _branch_alpha_beta(ab, qgrid)
     reserve = np.zeros(qgrid.shape)
     rates = np.full(qgrid.shape, np.nan)
     active = qgrid != 0
@@ -334,7 +364,7 @@ def _signed_rd_parameters(ab, qgrid):
     root = np.hypot(q, np.sqrt(2.0) * np.sqrt(q * a))
     r = np.empty_like(q)
     positive = q > 0
-    # Rationalize the same signed r expression where its numerator would cancel.
+    # For q>0, r=2q/(sqrt(q²+2qa)+q) avoids subtraction of close values.
     r[positive] = 2 * q[positive] / (root[positive] + q[positive])
     r[~positive] = (root[~positive] - q[~positive]) / a[~positive]
     reserve[active] = r
@@ -349,7 +379,11 @@ def rd_parameters(ab, qgrid):
 
 
 def _initial_hazard_factor(q, branch_ab, reserve, rates):
-    """Evaluate α/k=1-r, retaining precision as r approaches one."""
+    """Return the positive normalization α/k=1-r.
+
+    The identity 1-r=a*r*s/2 avoids cancellation when r approaches one.
+    Negative r uses 1-r directly; the linear case has normalization one.
+    """
     q, branch_ab, reserve, rates = np.broadcast_arrays(q, branch_ab, reserve, rates)
     factor = np.ones(q.shape)
     positive, negative = q > 0, q < 0
@@ -358,29 +392,48 @@ def _initial_hazard_factor(q, branch_ab, reserve, rates):
     return factor
 
 
+def _shoulder_weight(t):
+    """Evaluate g(t)=1-(1-exp(-t))/t, including g(0)=0.
+
+    The small-t expansion through t⁵ avoids cancellation in expm1(-t)/t.
+    """
+    t = np.asarray(t, dtype=float)
+    weight = np.empty_like(t)
+    small = t < _SERIES_THRESHOLD
+    x = t[small]
+    weight[small] = x * (1 / 2 + x * (-1 / 6 + x * (1 / 24 + x * (-1 / 120 + x / 720))))
+    x = t[~small]
+    weight[~small] = 1 + np.expm1(-x) / x
+    return weight
+
+
 def _fraction_effect_values(q, branch_ab, reserve, rates, doses):
-    """Evaluate H/k=d-q(1-exp(-sd)) using the signed RD parameters."""
+    """Return F(d)=H(d)/k=d-q*(1-exp(-s*d)), in Gy.
+
+    Direct evaluation is stable for q<0 and for 0<q<=d/4. Otherwise use
+    F(d)=(1-r)*d+r*d*g(s*d), whose positive terms avoid cancellation.
+    At q=0, F(d)=d; the undetermined rate is never evaluated.
+    """
     q, branch_ab, reserve, rates, doses = np.broadcast_arrays(q, branch_ab, reserve, rates, doses)
     effect = np.array(doses, dtype=float, copy=True)
-    direct = (q < 0) | ((q > 0) & (q <= 0.25 * doses))
+    direct = (q < 0) | ((q > 0) & (q <= _DIRECT_Q_FRACTION * doses))
     effect[direct] = doses[direct] + q[direct] * np.expm1(-rates[direct] * doses[direct])
     stable = (q > 0) & ~direct
     if np.any(stable):
         d, r, s = doses[stable], reserve[stable], rates[stable]
         t = s * d
-        remainder = np.empty_like(t)
-        small = t < 1e-2
-        x = t[small]
-        remainder[small] = x * (1 / 2 + x * (-1 / 6 + x * (1 / 24 + x * (-1 / 120 + x / 720))))
-        x = t[~small]
-        remainder[~small] = 1 + np.expm1(-x) / x
+        weight = _shoulder_weight(t)
         factor = _initial_hazard_factor(q[stable], branch_ab[stable], r, s)
-        effect[stable] = factor * d + r * d * remainder
+        effect[stable] = factor * d + r * d * weight
     return effect
 
 
 def fraction_bed(ab, qgrid, doses):
-    """Normalize the signed RD fraction effect by α/k=1-r."""
+    """Return BED per fraction, F(d)/(1-r), for each q and dose.
+
+    Rows correspond to candidate q values and columns to fraction doses.
+    Multiply by the fraction count for a treatment course. At q=0, BED=d.
+    """
     qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
     branch_ab, reserve, rates = _signed_rd_parameters(ab, qgrid)
     doses = np.atleast_1d(np.asarray(doses, dtype=float))
@@ -712,7 +765,11 @@ def _dispersion_value(eqd2, method):
 
 
 def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
-    """Refine the chosen dispersion minimum and calculate its profile bounds."""
+    """Search q over the selected interval and refine the best interior grid cell.
+
+    SSE and sample SD use the SD profile for tolerance bounds; range uses
+    the range profile. The requested endpoints and zero are retained.
+    """
     bound_pct = float(bound_pct)
     if not math.isfinite(bound_pct) or bound_pct <= 0:
         raise ValueError(
@@ -782,7 +839,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
         slope=slope,
         idx=idx,
         ab=float(ab),
-        signed_ab=float(ab) if dq >= 0 else -float(ab),
+        signed_ab=float(_branch_alpha_beta(ab, dq)),
         method=method,
         schedules=schedules,
         **statistics,
@@ -834,7 +891,7 @@ def export(result, folder):
                 w.writerow(
                     [q, r["mean"][j], r["sd"][j], r["spread"][j]]
                     + list(r["eqd2"][j])
-                    + [r["sample_sd"][j], r["sse"][j], r["ab"] if q >= 0 else -r["ab"]]
+                    + [r["sample_sd"][j], r["sse"][j], float(_branch_alpha_beta(r["ab"], q))]
                 )
         else:
             header = ["Dq_Gy"]
@@ -1409,12 +1466,12 @@ def _distribution(values, doses):
 
 
 def build_analysis(dataset):
-    """Describe the exact prescriptions and descriptor from an optimized result."""
+    """Calculate per-prescription BED, EQD2, and descriptive statistics."""
     r = dataset["result"]
     i, ab = r["idx"], r["ab"]
     dq = float(r["q"][i])
     input_ab = ab
-    ab = input_ab if dq >= 0 else -input_ab
+    ab = float(_branch_alpha_beta(input_ab, dq))
     reserves, rates = rd_parameters(input_ab, np.array([dq]))
     reserve = float(reserves[0])
     s = float(rates[0]) if dq != 0 else None
@@ -1424,7 +1481,7 @@ def build_analysis(dataset):
         d = total / n
         bed = n * per_fraction_bed
         lq_bed = total * (1 + d / ab)
-        lq_eqd2 = total * (ab + d) / (ab + 2) if ab != -2 else None
+        lq_eqd2 = total * (ab + d) / (ab + REFERENCE_DOSE_GY) if ab != -REFERENCE_DOSE_GY else None
         prescriptions.append(
             {
                 "prescription": name,
@@ -1445,7 +1502,11 @@ def build_analysis(dataset):
         for model in ("RD", "LQ")
     }
     lo, hi = r["profile_bounds"]
-    refs = {p["D_Gy"] for p in prescriptions if math.isclose(p["d_Gy"], 2.0, abs_tol=1e-10)}
+    refs = {
+        p["D_Gy"]
+        for p in prescriptions
+        if math.isclose(p["d_Gy"], REFERENCE_DOSE_GY, abs_tol=1e-10)
+    }
     return {
         "name": dataset.get("name") or "Prescriptions set",
         "alpha_beta": ab,
@@ -1471,7 +1532,7 @@ def analysis_summary(a):
     rows = [
         ("Prescriptions set", a["name"]),
         ("Prescriptions (N)", rd["N"]),
-        ("α/β (Gy)", a["alpha_beta"]),
+        ("Selected α/β (Gy)", a["alpha_beta"]),
         ("Input α/β (Gy, q ≥ 0)", a["input_alpha_beta"]),
         ("Dq (Gy)", a["D_q"]),
         ("s (Gy⁻¹)", a["s"]),
@@ -2519,7 +2580,7 @@ def launch_gui(db_path=None):
     for key, label, width in [
         ("prescriptions_set", "Prescriptions set", 250),
         ("N", "Prescriptions", 90),
-        ("ab", "α/β (Gy)", 90),
+        ("ab", "Selected α/β (Gy)", 125),
         ("dq", "Dq (Gy)", 100),
         ("criterion", "Minimized objective", 155),
         ("mean", "Mean EQD2 (Gy)", 125),

@@ -1,4 +1,4 @@
-"""Executable entry point. The scientific application remains in its source file."""
+"""Launch RD EQD2 Optimizer or run its runtime checks."""
 
 import sys
 import traceback
@@ -7,7 +7,7 @@ from pathlib import Path
 
 def main():
     try:
-        # The standalone file is also the project's only application source.
+        # Import the application module from the project root.
         if not getattr(sys, "frozen", False):
             sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         # Windowed executables have no standard streams. Retain CLI output in a log.

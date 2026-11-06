@@ -1,6 +1,6 @@
 # RD EQD2 Optimizer
 
-RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). Each prescriptions set has an α/β input for the q ≥ 0 branch.
+RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). It evaluates standard shoulders, the single-hit linear law, and inverted shoulders across the selected q interval.
 
 The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing eight prescriptions at α/β = 1.5 Gy is available on first launch.
 
@@ -40,14 +40,17 @@ Each selected set has its own tab, prescription choices, and α/β entry. Switch
 
 Enter a positive finite α/β value for q ≥ 0. The q < 0 branch uses the negative of that entered value. The candidate parameter q represents the shoulder displacement, and its fitted value is reported as Dq. The sign of α/β follows q.
 
-| Candidate q | α/β sign |
-| --- | --- |
-| q ≥ 0 | Positive |
-| q < 0 | Negative |
+| Candidate q | RD response | α/β of the response |
+| --- | --- | --- |
+| q > 0 | Standard shoulder | Positive |
+| q = 0 | Single-hit linear law | Undefined; EQD2 = D |
+| q < 0 | Inverted shoulder | Negative |
 
 The default interval is −50 to +50 Gy with a step of 0.001 Gy. The optimizer evaluates the full selected interval. Zero is included once when the interval spans zero; at zero, BED and EQD2 equal the physical dose.
 
 Use a smaller step for a finer grid. If the application reports too many grid points, increase the step or narrow the interval.
+
+See [Mathematical model and calculations](MATHEMATICS.md) for the signed reconstruction, BED and EQD2 equations, numerical evaluation, and optimization definitions.
 
 ### Minimization criterion
 
@@ -61,7 +64,7 @@ Use a smaller step for a finer grid. If the application reports too many grid po
 
 ## Read the results
 
-The results table reports Dq, α/β for the fitted branch, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
+The results table reports Dq, the selected α/β reference, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
 
 A minimum marked **BOUNDARY** lies at an endpoint of the search interval. A wider interval may help locate an interior minimum. **Outside search** means that the selected interval does not contain both profile-bound crossings.
 
@@ -104,9 +107,8 @@ The first three columns are required for import. A file must describe one prescr
 
 - **Export results + graph** saves the optimization grid, optimal prescription values, and an optimization plot.
 - **Export image…** saves the optimization plot as PNG, JPEG, or EPS with a selected resolution.
-- **Plot settings…** controls titles, labels, fonts, colors, dimensions, and axis limits.
+- **Plot settings…** controls titles, labels, fonts, colors, dimensions, and vertical axis limits. The horizontal axis spans q start to q end.
 - The analysis window exports tables as CSV, TSV, JSON, or LaTeX, and dispersion plots as PNG, JPEG, EPS, PDF, or SVG.
-
 
 ## Command-line use
 

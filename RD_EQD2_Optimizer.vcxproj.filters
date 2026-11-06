@@ -45,6 +45,9 @@
     <None Include="README.md">
       <Filter>Documentation</Filter>
     </None>
+    <None Include="MATHEMATICS.md">
+      <Filter>Documentation</Filter>
+    </None>
     <None Include="samples\prostate.csv">
       <Filter>Samples</Filter>
     </None>

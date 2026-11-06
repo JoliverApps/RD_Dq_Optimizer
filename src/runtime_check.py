@@ -530,7 +530,7 @@ def run_checks(report_path, include_gui=True):
                 passed("Standalone and project use one application source")
             result = app.analyze(1.5, 0.01, 50.0, 0.01, app.PROSTATE_PRESCRIPTIONS)
             i = result["idx"]
-            # Baseline measured directly from the unchanged uploaded application.
+            # Expected calibration for the eight-prescription prostate set.
             np.testing.assert_allclose(result["q"][i], 3.543859355746318, atol=2e-5, rtol=0)
             np.testing.assert_allclose(result["mean"][i], 75.81790297672867, atol=2e-5, rtol=0)
             np.testing.assert_allclose(result["rsd"][i], 2.8365977004593472, atol=2e-5, rtol=0)
@@ -539,7 +539,7 @@ def run_checks(report_path, include_gui=True):
                 mean_EQD2_Gy=float(result["mean"][i]),
                 RSD_percent=float(result["rsd"][i]),
             )
-            passed("Original prostate calibration baseline")
+            passed("Prostate calibration")
 
             doses = np.array([dose / n for _, dose, n in app.PROSTATE_PRESCRIPTIONS])
             fractions = np.array([n for _, _, n in app.PROSTATE_PRESCRIPTIONS])
