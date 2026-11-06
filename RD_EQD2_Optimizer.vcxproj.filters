@@ -18,7 +18,7 @@
     <None Include="src\main.py">
       <Filter>Source</Filter>
     </None>
-    <None Include="src\rd_eqd2_optimizer.py">
+    <None Include="rd_eqd2_optimizer.py">
       <Filter>Source</Filter>
     </None>
     <None Include="src\runtime_check.py">

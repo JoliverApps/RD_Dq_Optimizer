@@ -38,7 +38,7 @@
   </PropertyGroup>
   <ItemGroup>
     <None Include="src\main.py" />
-    <None Include="src\rd_eqd2_optimizer.py" />
+    <None Include="rd_eqd2_optimizer.py" />
     <None Include="src\runtime_check.py" />
     <None Include="tools\build.py" />
     <None Include="Build.cmd" />

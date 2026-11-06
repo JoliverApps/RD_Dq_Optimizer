@@ -1,6 +1,6 @@
 # RD EQD2 Optimizer
 
-This Visual Studio solution builds the supplied RD EQD2 Optimizer into a Windows x64 executable. The application in `src/rd_eqd2_optimizer.py` is identical to the accompanying standalone `rd_eqd2_optimizer.py`. It includes the prescription selection controls, main-page α/β entry, CSV set export/import, RD calculations, SQLite database, analysis window, robustness calculations, plot settings, and export tools.
+This Visual Studio solution builds the supplied RD EQD2 Optimizer into a Windows x64 executable. The root-level `rd_eqd2_optimizer.py` is the complete standalone application and the single source used by the Visual Studio executable build. Edit this one file to update both versions. It includes the prescription selection controls, main-page α/β entry, CSV set export/import, RD calculations, SQLite database, analysis window, robustness calculations, plot settings, and export tools.
 
 The **Prostate — 8 prescriptions** set at **α/β = 1.5 Gy** is the only built-in default. Other sets can be created or imported. Previously saved sets remain available; initialization does not delete or overwrite them. Deleted defaults are not recreated on subsequent launches.
 
@@ -25,7 +25,7 @@ Numerical evaluation uses `expm1` and a low-argument series to avoid cancellatio
 Example with a negative fixed ratio:
 
 ```bat
-python src/rd_eqd2_optimizer.py --batch --ab=-5 --dq-start=-50 --dq-end=0 --out inverse-shoulder-results
+python rd_eqd2_optimizer.py --batch --ab=-5 --dq-start=-50 --dq-end=0 --out inverse-shoulder-results
 ```
 
 ## Select prescriptions and edit α/β
@@ -143,8 +143,8 @@ The Release executable supports the same arguments and exports, with printed out
 
 After editing the application, select **Build > Rebuild Solution**. To recreate the build environment after changing Python installations, remove the project's `.venv-build` directory and build again. This directory contains build dependencies, not user prescriptions.
 
-The standalone application and `src/rd_eqd2_optimizer.py` contain the same code. The storage API uses `list_sets`, `get_set`, `find_set`, `save_set`, and `delete_set`. Existing database files retain their format. CSV imports accept both current column names and older `tumor` headers.
+The standalone application, project launcher, and executable build all use the same root-level `rd_eqd2_optimizer.py`; no separate application copy needs updating. The storage API uses `list_sets`, `get_set`, `find_set`, `save_set`, and `delete_set`. Existing database files retain their format. CSV imports accept both current column names and older `tumor` headers.
 
-`pyproject.toml` defines the Python formatting and lint rules. With Ruff installed, run `ruff check src tools` and `ruff format --check src tools` from the project folder.
+`pyproject.toml` defines the Python formatting and lint rules. With Ruff installed, run `ruff check rd_eqd2_optimizer.py src tools` and `ruff format --check rd_eqd2_optimizer.py src tools` from the project folder.
 
 Reference documentation: [Visual Studio Makefile projects](https://learn.microsoft.com/en-us/cpp/build/reference/creating-a-makefile-project?view=msvc-170), [PyInstaller usage](https://pyinstaller.org/en/stable/usage.html), and [PyInstaller specifications](https://pyinstaller.org/en/stable/spec-files.html).

@@ -8,7 +8,7 @@ debug_build = configuration == 'Debug'
 
 a = Analysis(
     [str(root / 'src' / 'main.py')],
-    pathex=[str(root / 'src')],
+    pathex=[str(root), str(root / 'src')],
     binaries=[],
     datas=[],
     hiddenimports=[

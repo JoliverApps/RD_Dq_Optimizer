@@ -150,7 +150,7 @@ def main():
         "configuration": args.configuration,
         "executable": str(executable.relative_to(ROOT)),
         "sha256": file_sha256(executable),
-        "application_source_sha256": file_sha256(ROOT / "src" / "rd_eqd2_optimizer.py"),
+        "application_source_sha256": file_sha256(ROOT / "rd_eqd2_optimizer.py"),
         "dependencies": packages.splitlines(),
         "source_test": "passed",
         "executable_test": "passed",

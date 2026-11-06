@@ -255,6 +255,8 @@ def check_gui(app, db_path, result):
 
 
 def run_checks(report_path, include_gui=True):
+    import sys
+
     import numpy as np
 
     import rd_eqd2_optimizer as app
@@ -270,6 +272,11 @@ def run_checks(report_path, include_gui=True):
         # Isolate verification from saved user prescriptions and preferences.
         with tempfile.TemporaryDirectory(prefix="rd-eqd2-check-") as temporary:
             folder = Path(temporary)
+            if not getattr(sys, "frozen", False):
+                root = Path(__file__).resolve().parents[1]
+                assert Path(app.__file__).resolve() == root / "rd_eqd2_optimizer.py"
+                assert not (root / "src" / "rd_eqd2_optimizer.py").exists()
+                passed("Standalone and project use one application source")
             result = app.analyze(1.5, 0.01, 50.0, 0.01, app.PROSTATE_PRESCRIPTIONS)
             i = result["idx"]
             # Baseline measured directly from the unchanged uploaded application.

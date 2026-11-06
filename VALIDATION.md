@@ -14,9 +14,12 @@ d7066a9be78631ac1447d344004f67fe44cdb44d5827a4b7248888340aa4d267
 
 | Check | Result |
 | --- | --- |
-| Ruff lint and formatting | Passed for `src` and `tools` |
+| Ruff lint and formatting | Passed for `rd_eqd2_optimizer.py`, `src`, and `tools` |
 | Python bytecode compilation | Passed |
-| Full source runtime suite without GUI | Passed, all 12 check groups |
+| Full source runtime suite without GUI | Passed, all 13 check groups |
+| Shared application source | Project launcher imports the root standalone file; no separate application copy remains |
+| Isolated standalone execution | Single-file positive and negative batch runs passed outside the project directory |
+| Visual Studio source references | All referenced files exist after moving the application to the project root |
 | Positive and inverse-shoulder EQD2 | Matched independently integrated hazards to relative tolerance 2 × 10⁻¹³ |
 | Signed symbolic expression and numerical mapping | Both branches matched known r and s values |
 | q = 0 and one-sided limits | EQD2 = D exactly at zero; nearby values converge from each compatible branch |
@@ -45,9 +48,9 @@ exports, image formats, combined-set exports, and plot preferences.
 Reproduce the headless checks with:
 
 ```text
-python -m ruff check src tools
-python -m ruff format --check src tools
-python -m compileall -q src tools
+python -m ruff check rd_eqd2_optimizer.py src tools
+python -m ruff format --check rd_eqd2_optimizer.py src tools
+python -m compileall -q rd_eqd2_optimizer.py src tools
 python src/main.py --self-test signed-validation.json --no-gui
 ```
 

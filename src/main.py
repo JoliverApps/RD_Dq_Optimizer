@@ -7,6 +7,9 @@ from pathlib import Path
 
 def main():
     try:
+        # The standalone file is also the project's only application source.
+        if not getattr(sys, "frozen", False):
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
         # Windowed executables have no standard streams. Retain CLI output in a log.
         if sys.stdout is None or sys.stderr is None:
             log_dir = Path.home() / ".rd_dq_optimizer"
