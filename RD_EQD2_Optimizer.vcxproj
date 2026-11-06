@@ -47,7 +47,6 @@
     <None Include="pyproject.toml" />
     <None Include="RD_EQD2_Optimizer.spec" />
     <None Include="README.md" />
-    <None Include="VALIDATION.md" />
     <None Include="samples\prostate.csv" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

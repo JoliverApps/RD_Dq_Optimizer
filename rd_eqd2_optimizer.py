@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""RD EQD2 optimization: determine Dq from radiotherapy prescriptions (Python 3.9+).
+"""RD EQD2 Optimizer: estimate Dq from radiotherapy prescriptions.
 
 Run this file to open the GUI. Dependencies: numpy, matplotlib, sympy, and Tkinter.
-The default prostate set contains the manuscript's eight prescriptions at ab=1.5.
+The prostate set contains eight prescriptions at alpha/beta=1.5 Gy.
 CSV import: name,total_gy,fractions; optional prescriptions_set,alpha_beta columns.
 Select individual prescriptions and edit alpha/beta directly on the main page.
 Batch example: python rd_eqd2_optimizer.py --batch --dataset prostate --out results
@@ -58,7 +58,7 @@ def EQD2_FN(ab, q, d, n):
     return result.item() if result.ndim == 0 else result
 
 
-# Established localized prostate-cancer schedules from the supplied manuscript table.
+# Established localized prostate-cancer prescriptions.
 # EQD2 is always recalculated from D, n and alpha/beta, not stored as a fixed input.
 PROSTATE_SET_NAME = "Prostate — 8 prescriptions"
 PROSTATE_ALPHA_BETA = 1.5
@@ -872,7 +872,7 @@ def export(result, folder):
                 if multi and len(datasets) > 1:
                     values = [dataset["name"], r["ab"], r["method"], r["q"][i]] + values
                 w.writerow(values)
-    # Preserve the original default file name, location and 160-ppi rendering.
+    # Export the optimization profile at 160 ppi.
     export_image(result, folder / "range.png", ppi=160)
 
 
@@ -1685,7 +1685,7 @@ def export_analysis_tables(a, folder, format="csv"):
 
 
 def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, reference=None):
-    """Match the supplied scatter plot, with all annotations inside a zero-based axis."""
+    """Plot prescription EQD2 values and fitted trends against dose per fraction."""
     from matplotlib.ticker import MaxNLocator, MultipleLocator
 
     fig.clear()
@@ -1699,8 +1699,7 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     stats = a["models"]["RD"]
     blue = "#1f77b4"
     orange = "#d95f02"
-    # Opaque pastel is equivalent to the original white-background 14% SD band,
-    # and preserves its appearance in EPS as well as raster exports.
+    # Use an opaque pastel SD band for consistent EPS and raster appearance.
     ax.axhspan(
         stats["mean"] - stats["SD"],
         stats["mean"] + stats["SD"],
@@ -1747,7 +1746,7 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     ax.set_xlim(float(d.min()) - 0.20, float(d.max()) + 0.25)
     visible = np.concatenate([rd, lq]) if show_lq else rd
     high = max(float(visible.max()), stats["mean"] + stats["SD"], reference or 0)
-    # Preserve the supplied 0--140 Gy prostate view; expand for other sets.
+    # Use a minimum upper limit of 140 Gy and expand for larger values.
     upper = max(140.0, 20.0 * math.ceil(high * 1.08 / 20.0))
     lower = min(0.0, 20.0 * math.floor(float(visible.min()) * 1.08 / 20.0))
     ax.set_ylim(lower, upper)

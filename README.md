@@ -1,150 +1,181 @@
 # RD EQD2 Optimizer
 
-This Visual Studio solution builds the supplied RD EQD2 Optimizer into a Windows x64 executable. The root-level `rd_eqd2_optimizer.py` is the complete standalone application and the single source used by the Visual Studio executable build. Edit this one file to update both versions. It includes the prescription selection controls, main-page α/β entry, CSV set export/import, RD calculations, SQLite database, analysis window, robustness calculations, plot settings, and export tools.
+RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). Each prescriptions set has a fixed α/β value.
 
-The **Prostate — 8 prescriptions** set at **α/β = 1.5 Gy** is the only built-in default. Other sets can be created or imported. Previously saved sets remain available; initialization does not delete or overwrite them. Deleted defaults are not recreated on subsequent launches.
+The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing eight prescriptions at α/β = 1.5 Gy is available on first launch.
 
-## Signed RD calibration
+## Installation
 
-Each prescriptions set retains its entered **finite, nonzero α/β** throughout optimization. Only the candidate shoulder displacement `q` is optimized. Negative α/β values describe the effective inverse-shoulder branch and are supported in the main page, saved sets, CSV imports/exports, analysis, and robustness calculations. Zero α/β and nonfinite inputs are rejected.
+### Windows executable
 
-With `a = α/β` and `q = r/s`, the root is selected to retain `s > 0`:
+Open `RD_EQD2_Optimizer.exe`. The executable includes its Python runtime and dependencies. Choose a writable folder when saving exports.
 
-| Fixed ratio | Candidate domain | Sensitization rate |
-| --- | --- | --- |
-| `a > 0` | `q > 0` | `s = (sqrt(1 + 2a/q) − 1)/a` |
-| `a < 0` | `q < 0` | `s = (−1 − sqrt(1 + 2a/q))/a` |
-| Either sign | `q = 0` | Linear-survival boundary: `r = 0`, `BED = D`, `EQD2 = D`; finite `s` is undetermined. |
+### Python application
 
-The default search interval is −50 to +50 Gy. For each set, the optimizer uses the part compatible with its fixed ratio's sign, including zero when the selected interval spans it. Thus, positive and negative sets can be optimized independently using the same search controls. An interval containing no compatible candidate produces an explanatory error. The application never changes the sign or magnitude of the entered ratio to accommodate a candidate. Both signs of `q` are supported across the model; a single fixed ratio selects one branch.
+Install Python 3.11 or 3.12 with pip and Tcl/Tk. Download and extract the repository, open a terminal in its folder, and run:
 
-At zero, β vanishes and the strict α/β ratio is undefined. The entered finite ratio labels the branch approaching this boundary; it is not assigned as the ratio of the exact zero-β law. EQD2 and BED have continuous limits there, which are evaluated directly without division by zero. If an optimum reaches zero, analysis reports `r = 0` and `s = N/A`.
-
-Numerical evaluation uses `expm1` and a low-argument series to avoid cancellation. Existing positive-only SQLite databases are migrated transactionally, retaining set IDs, prescription IDs, and metadata. The LQ EQD2 comparison is reported as unavailable at α/β = −2 Gy because its reference denominator vanishes; RD calculations remain available. For other negative ratios, LQ comparisons are algebraic low-dose extrapolations and may produce negative values. Robustness sensitivity values must retain the fitted branch's sign.
-
-Example with a negative fixed ratio:
-
-```bat
-python rd_eqd2_optimizer.py --batch --ab=-5 --dq-start=-50 --dq-end=0 --out inverse-shoulder-results
+```text
+python -m pip install -r requirements.txt
+python rd_eqd2_optimizer.py
 ```
 
-## Select prescriptions and edit α/β
+If you downloaded the standalone `rd_eqd2_optimizer.py` file without the repository, install its dependencies and launch it with:
 
-1. Check the **prescriptions sets** to optimize in the left panel.
-2. Choose the set to view, then click its **Optimize** checkboxes to include or exclude individual prescriptions. **Select all prescriptions** and **Clear prescriptions** apply to the viewed set. At least two checked prescriptions are required per enabled set.
-3. Edit **α/β (Gy)** above the prescription list. The current entry is used immediately when you run optimization or export the set. Each set keeps its own entry and prescription choices as you switch between sets.
-4. Click **Save α/β** to retain that value for future sessions. Prescription checkboxes are session choices and do not remove saved prescriptions.
-5. Click **Run optimization**. Plots, analysis, and result exports use exactly the checked prescriptions and entered α/β for each enabled set.
+```text
+python -m pip install numpy==2.2.6 matplotlib==3.10.3 sympy==1.14.0
+python rd_eqd2_optimizer.py
+```
 
-Use **Export prescriptions set…** to export the viewed set's checked prescriptions and current α/β as an importable CSV. This button works before optimization. The CSV has `name,total_gy,fractions,prescriptions_set,alpha_beta` columns. **Import prescriptions set…** accepts this format and older CSVs with a `tumor` column.
+## Run an optimization
 
-To run only the standalone file, install the dependencies from `requirements.txt`, then run `python rd_eqd2_optimizer.py`.
+1. Select the prescriptions sets to analyze.
+2. Choose a set to view its prescriptions. Check the **Optimize** boxes for the prescriptions to include. Each selected set needs at least two prescriptions.
+3. Enter **α/β (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
+4. Set **q start**, **q end**, and **q step**, then choose a minimization criterion.
+5. Click **Run optimization**.
 
-## Build in Visual Studio
+Each selected set is optimized independently. Prescription checkboxes control the current analysis; they do not delete saved prescriptions.
 
-1. Install **Visual Studio 2022** with the **Desktop development with C++** workload and the **MSVC v143** tools. This supplies Visual Studio's Makefile project support.
-2. Install **64-bit Python 3.12** from [python.org](https://www.python.org/downloads/windows/), including **pip**, **venv**, **Tcl/Tk**, and the **Python launcher**. Python 3.11 x64 is also supported. Python is needed on the build computer only.
-3. Extract this entire ZIP into a writable folder and open **RD_EQD2_Optimizer.sln**.
-4. Select **Release | x64**, then choose **Build > Build Solution** (`Ctrl+Shift+B`).
-5. Run or distribute **dist\Release\RD_EQD2_Optimizer.exe**.
+### Parameters and search interval
 
-The first build downloads dependencies and can take several minutes. Later builds reuse the private build environment. An internet connection is required to install the dependencies initially. Wait for the final **Build and executable verification passed** message.
+α/β must be finite and nonzero. It remains fixed during optimization. The candidate parameter q represents the shoulder displacement, and its fitted value is reported as Dq.
 
-The Release output is one executable with Python, Tcl/Tk, NumPy, Matplotlib, and SymPy bundled inside it. End users can run it without installing Python, Visual Studio, or those libraries. First startup includes extracting its bundled runtime into the user's temporary folder.
+| Fixed α/β | Search domain |
+| --- | --- |
+| Positive | q ≥ 0 |
+| Negative | q ≤ 0 |
+| Either sign at q = 0 | BED and EQD2 equal the physical dose |
 
-## Build without the IDE
+The default interval is −50 to +50 Gy with a step of 0.001 Gy. Each set uses the part of the interval compatible with its α/β value. Zero is included when the interval spans zero.
 
-Open Command Prompt in this folder:
+Use a smaller step for a finer grid. If the application reports too many grid points, increase the step or narrow the interval.
+
+### Minimization criterion
+
+| Criterion | Quantity minimized |
+| --- | --- |
+| SSE | Sum of squared deviations of prescription EQD2 values from their mean |
+| SD | Sample standard deviation of EQD2 |
+| Range | Difference between the highest and lowest EQD2 |
+
+**Near-optimal bounds (%)** defines a tolerance above the minimum. SSE and SD optimization use the sample SD for these bounds; range optimization uses the EQD2 range. The default tolerance is 5%.
+
+## Read the results
+
+The results table reports Dq, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
+
+A minimum marked **BOUNDARY** lies at an endpoint of the search interval. A wider compatible interval may help locate an interior minimum. **Outside search** means that the selected interval does not contain both profile-bound crossings.
+
+Click **Analysis…** for:
+
+- A scatter plot of EQD2 against dose per fraction.
+- Per-prescription RD BED and EQD2, with LQ comparisons.
+- Summary statistics, fitted trends, and RD parameters r and s.
+- Leave-one-out and α/β sensitivity analyses.
+
+At Dq = 0, the linear response gives BED = EQD2 = D. The sensitization rate s is displayed as **N/A**.
+
+For α/β = −2 Gy, LQ EQD2 is unavailable because its reference denominator is zero. RD results remain available. For other negative α/β values, LQ extrapolations can produce negative equivalent doses.
+
+### Robustness analysis
+
+Open the **Robustness** tab in the analysis window and click **Run robustness**. Leave-one-out analysis requires at least three prescriptions.
+
+To assess α/β sensitivity, enter comma-separated values with the same sign as the fitted set's α/β. Each value is held fixed during its own optimization.
+
+## Manage prescriptions sets
+
+Use **New prescriptions set**, **Edit prescriptions set**, and **Delete prescriptions set** to manage saved data. Each prescription requires a name, a positive total dose in Gy, and a positive integer number of fractions.
+
+Use **Export prescriptions set…** to save the viewed set's checked prescriptions and current α/β as CSV. Use **Import prescriptions set…** to load a CSV file.
+
+The CSV columns are:
+
+| Column | Contents |
+| --- | --- |
+| `name` | Prescription name |
+| `total_gy` | Total dose in Gy |
+| `fractions` | Number of fractions |
+| `prescriptions_set` | Set name |
+| `alpha_beta` | Fixed α/β in Gy |
+
+The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
+
+## Export data and plots
+
+- **Export results + graph** saves the optimization grid, optimal prescription values, and an optimization plot.
+- **Export image…** saves the optimization plot as PNG, JPEG, or EPS with a selected resolution.
+- **Plot settings…** controls titles, labels, fonts, colors, dimensions, and axis limits.
+- The analysis window exports tables as CSV, TSV, JSON, or LaTeX, and dispersion plots as PNG, JPEG, EPS, PDF, or SVG.
+
+When a combined export contains sets with positive and negative α/β values, blank cells mark candidate q values outside a set's domain.
+
+## Command-line use
+
+Run the prostate set:
+
+```text
+python rd_eqd2_optimizer.py --batch --dataset prostate --out results
+```
+
+Analyze a CSV file:
+
+```text
+python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab 1.5 --dq-start 0 --dq-end 50 --dq-step 0.01 --out results
+```
+
+Analyze a negative-α/β set:
+
+```text
+python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab=-5 --dq-start=-50 --dq-end=0 --out results
+```
+
+Use `--set "Set name"` to select a saved prescriptions set. Use `--method sse`, `--method sd`, or `--method range` to choose the criterion. Use `--db` to select a prescriptions database. Run `python rd_eqd2_optimizer.py --help` for all options.
+
+## Saved data
+
+On Windows, the default files are:
+
+| File | Location |
+| --- | --- |
+| Prescriptions database | `%USERPROFILE%\.rd_dq_optimizer\prescriptions.sqlite3` |
+| Plot preferences | `%USERPROFILE%\.rd_dq_optimizer\plot_settings.json` |
+| Windows executable log | `%USERPROFILE%\.rd_dq_optimizer\application.log` |
+
+On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and Windows executable use the same default database. Back up the database file to retain saved sets.
+
+A different database can be selected with `--db` or the `RD_DQ_DB_PATH` environment variable.
+
+## Build a Windows executable
+
+Install:
+
+- Visual Studio 2022 with **Desktop development with C++** and **MSVC v143**.
+- 64-bit Python 3.11 or 3.12 with pip, venv, Tcl/Tk, and the Python launcher.
+
+Open `RD_EQD2_Optimizer.sln`, select **Release | x64**, and choose **Build > Build Solution**. The first build requires internet access to install dependencies. Run the resulting `dist\Release\RD_EQD2_Optimizer.exe`.
+
+To build from Command Prompt, run:
 
 ```bat
 Build.cmd Build Release
 ```
 
-Other supported commands:
-
-```bat
-Build.cmd Build Debug
-Build.cmd Rebuild Release
-Build.cmd Clean Release
-Build.cmd Test Release
-Build.cmd Run
-```
-
-`Test` verifies the source, calculations, exports, and GUI. `Run` opens the source application in the prepared Python environment. `Clean` removes generated output for the chosen configuration. These commands never delete the application's saved prescription database.
-
-If Python is installed in a custom location, set its exact interpreter path before building or starting Visual Studio:
+If Python is installed in a custom location:
 
 ```bat
 set "RD_PYTHON=C:\Path\To\Python312\python.exe"
 Build.cmd Build Release
 ```
 
-Alternatively, from a Visual Studio Developer Command Prompt:
+A Release build produces a single executable. A Debug build produces `dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe`; distribute its entire containing folder, including `_internal`.
 
-```bat
-msbuild RD_EQD2_Optimizer.sln /t:Build /p:Configuration=Release /p:Platform=x64
-```
+## Troubleshooting
 
-## Configurations and files
-
-| Configuration | Executable | Distribution |
-| --- | --- | --- |
-| Release | `dist\Release\RD_EQD2_Optimizer.exe` | Copy the single executable. |
-| Debug | `dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe` | Keep the entire containing folder, including `_internal`. |
-
-Debug uses a console and a directory of runtime files for easier diagnosis. It preserves the application's batch output. Use `Ctrl+F5` to start a built configuration from Visual Studio. Python source breakpoints require a Python debugger; the solution's default launch runs the packaged program.
-
-This is a Visual Studio Makefile project. Its build commands call PyInstaller to package the standalone Python application. The scientific application has not been translated to C++ or C#. Python files and build files appear in Solution Explorer and remain editable.
-
-## Verification
-
-Every build runs integration checks **before packaging** and **against the resulting executable**. Checks cover the original prostate calibration, SymPy execution, all three minimization methods, SQLite operations, CSV import, prostate-only default initialization, saved-set preservation, independent user-created sets, prescription subsets, per-set α/β drafts, CSV set round trips, analysis and robustness tables, image formats, preference persistence, and GUI/dialog creation. Test databases are temporary and isolated from saved user data.
-
-Verification reports are written to:
-
-```text
-.build\Release\source-test.json
-.build\Release\executable-test.json
-```
-
-A build fails if either check fails. `dist\Release\build-info.json` records the executable checksum, application source checksum, installed dependencies, and check results. Read `VALIDATION.md` for checks completed when this project was prepared.
-
-## Saved data
-
-Existing application storage is retained:
-
-```text
-%USERPROFILE%\.rd_dq_optimizer\prescriptions.sqlite3
-%USERPROFILE%\.rd_dq_optimizer\plot_settings.json
-```
-
-The executable and the standalone Python application use the same default database. Existing prescription sets remain available. The `RD_DQ_DB_PATH` environment variable and the application's `--db` argument can select a different database, as in the application. Export destinations are selected in the application.
-
-If a windowed Release run encounters a Python startup error, it shows an error dialog. Its standard output and error stream are recorded in `%USERPROFILE%\.rd_dq_optimizer\application.log`. The Debug build shows output directly in its console.
-
-## Batch example
-
-Use `--set "Saved set name"` to optimize a saved prescriptions set.
-
-
-Use the Debug executable to see output in Command Prompt:
-
-```bat
-"dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe" --batch --dataset prostate --out results
-```
-
-The Release executable supports the same arguments and exports, with printed output going to its application log. From another program or script, wait for the process to exit before consuming its files.
-
-`samples/prostate.csv` contains the eight prescriptions from the uploaded source. The application remains the authority for its built-in prostate set.
-
-## Dependencies and maintenance
-
-`requirements.txt` pins the application libraries and `requirements-build.txt` pins PyInstaller and its hook package. Transitive dependencies are recorded after each successful build in `build-info.json`. Dependencies retain their respective licenses; no third-party library code is included in this source archive.
-
-After editing the application, select **Build > Rebuild Solution**. To recreate the build environment after changing Python installations, remove the project's `.venv-build` directory and build again. This directory contains build dependencies, not user prescriptions.
-
-The standalone application, project launcher, and executable build all use the same root-level `rd_eqd2_optimizer.py`; no separate application copy needs updating. The storage API uses `list_sets`, `get_set`, `find_set`, `save_set`, and `delete_set`. Existing database files retain their format. CSV imports accept both current column names and older `tumor` headers.
-
-`pyproject.toml` defines the Python formatting and lint rules. With Ruff installed, run `ruff check rd_eqd2_optimizer.py src tools` and `ruff format --check rd_eqd2_optimizer.py src tools` from the project folder.
-
-Reference documentation: [Visual Studio Makefile projects](https://learn.microsoft.com/en-us/cpp/build/reference/creating-a-makefile-project?view=msvc-170), [PyInstaller usage](https://pyinstaller.org/en/stable/usage.html), and [PyInstaller specifications](https://pyinstaller.org/en/stable/spec-files.html).
+| Problem | Action |
+| --- | --- |
+| Missing NumPy, Matplotlib, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
+| Tkinter is unavailable | Install Tcl/Tk support for the selected Python interpreter. |
+| No compatible q values | Use an interval containing nonnegative q for positive α/β, or nonpositive q for negative α/β. |
+| Too many grid points | Increase q step or narrow the interval. |
+| A Windows executable reports a startup error | Check `application.log` in the data folder. |
