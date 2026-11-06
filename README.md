@@ -4,6 +4,30 @@ This Visual Studio solution builds the supplied RD EQD2 Optimizer into a Windows
 
 The **Prostate — 8 prescriptions** set at **α/β = 1.5 Gy** is the only built-in default. Other sets can be created or imported. Previously saved sets remain available; initialization does not delete or overwrite them. Deleted defaults are not recreated on subsequent launches.
 
+## Signed RD calibration
+
+Each prescriptions set retains its entered **finite, nonzero α/β** throughout optimization. Only the candidate shoulder displacement `q` is optimized. Negative α/β values describe the effective inverse-shoulder branch and are supported in the main page, saved sets, CSV imports/exports, analysis, and robustness calculations. Zero α/β and nonfinite inputs are rejected.
+
+With `a = α/β` and `q = r/s`, the root is selected to retain `s > 0`:
+
+| Fixed ratio | Candidate domain | Sensitization rate |
+| --- | --- | --- |
+| `a > 0` | `q > 0` | `s = (sqrt(1 + 2a/q) − 1)/a` |
+| `a < 0` | `q < 0` | `s = (−1 − sqrt(1 + 2a/q))/a` |
+| Either sign | `q = 0` | Linear-survival boundary: `r = 0`, `BED = D`, `EQD2 = D`; finite `s` is undetermined. |
+
+The default search interval is −50 to +50 Gy. For each set, the optimizer uses the part compatible with its fixed ratio's sign, including zero when the selected interval spans it. Thus, positive and negative sets can be optimized independently using the same search controls. An interval containing no compatible candidate produces an explanatory error. The application never changes the sign or magnitude of the entered ratio to accommodate a candidate. Both signs of `q` are supported across the model; a single fixed ratio selects one branch.
+
+At zero, β vanishes and the strict α/β ratio is undefined. The entered finite ratio labels the branch approaching this boundary; it is not assigned as the ratio of the exact zero-β law. EQD2 and BED have continuous limits there, which are evaluated directly without division by zero. If an optimum reaches zero, analysis reports `r = 0` and `s = N/A`.
+
+Numerical evaluation uses `expm1` and a low-argument series to avoid cancellation. Existing positive-only SQLite databases are migrated transactionally, retaining set IDs, prescription IDs, and metadata. The LQ EQD2 comparison is reported as unavailable at α/β = −2 Gy because its reference denominator vanishes; RD calculations remain available. For other negative ratios, LQ comparisons are algebraic low-dose extrapolations and may produce negative values. Robustness sensitivity values must retain the fitted branch's sign.
+
+Example with a negative fixed ratio:
+
+```bat
+python src/rd_eqd2_optimizer.py --batch --ab=-5 --dq-start=-50 --dq-end=0 --out inverse-shoulder-results
+```
+
 ## Select prescriptions and edit α/β
 
 1. Check the **prescriptions sets** to optimize in the left panel.

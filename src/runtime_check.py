@@ -6,6 +6,140 @@ import tempfile
 from pathlib import Path
 
 
+def check_signed_model(app, folder):
+    """Check the signed extension against independently integrated hazards."""
+    import sqlite3
+
+    import mpmath as mp
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    mp.mp.dps = 50
+    schedules = [("Reference", 78, 39), ("Large fractions", 30, 5), ("Small fractions", 54, 30)]
+    for reserve, rate in ((0.8, 0.3), (-0.8, 0.3), (-3.0, 0.5)):
+        ab = 2 * (1 - reserve) / (reserve * rate)
+        q = reserve / rate
+
+        def effect(dose, reserve=reserve, rate=rate):
+            return mp.quad(lambda x: 1 - mp.mpf(reserve) * mp.exp(-mp.mpf(rate) * x), [0, dose])
+
+        expected = [float(2 * n * effect(total / n) / effect(2)) for _, total, n in schedules]
+        np.testing.assert_allclose(app.evaluate(ab, [q], schedules)[0], expected, rtol=2e-13)
+        np.testing.assert_allclose(
+            app.EQD2_FN(
+                ab, q, [total / n for _, total, n in schedules], [n for _, _, n in schedules]
+            ),
+            expected,
+            rtol=2e-13,
+        )
+        actual_r, actual_s = app.rd_parameters(ab, [q])
+        np.testing.assert_allclose([actual_r[0], actual_s[0]], [reserve, rate], rtol=2e-14)
+
+    physical = np.array([total for _, total, _ in schedules])
+    for ab in (1.5, -1.5, -2.0):
+        np.testing.assert_array_equal(app.evaluate(ab, [0], schedules)[0], physical)
+        assert app.EQD2_FN(ab, 0, 3, 10) == 30
+        near = np.copysign(1e-12, ab)
+        np.testing.assert_allclose(app.evaluate(ab, [near], schedules)[0], physical, atol=1e-9)
+        boundary = app.analyze(ab, 0, 0, 0.1, schedules)
+        detail = app.build_analysis({"name": "Linear boundary", "result": boundary})
+        assert detail["r"] == 0 and detail["s"] is None
+        assert all(p["RD_BED_Gy"] == p["D_Gy"] for p in detail["prescriptions"])
+        app.export_analysis_tables(detail, folder / f"boundary-{ab}", "json")
+        app.draw_dispersion_plot(Figure(), detail)
+    for ab, q in ((1.5, -1), (-1.5, 1)):
+        try:
+            app.evaluate(ab, [q], schedules)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("An incompatible fixed-ratio branch was accepted")
+    for invalid in (0, float("nan"), float("inf"), -float("inf")):
+        try:
+            app.validated_alpha_beta(invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Invalid alpha/beta was accepted")
+
+    # Construct isoeffective schedules using independent scalar inversion.
+    ab, q = -5.0, -3.0
+    rate = (1 + mp.sqrt(1 + 2 * ab / q)) / abs(ab)
+
+    def effect(dose):
+        return dose - q * (1 - mp.exp(-rate * dose))
+
+    synthetic = []
+    for n in (10, 20, 30, 39, 50):
+        dose = float(mp.findroot(lambda d, n=n: n * effect(d) - 39 * effect(2), (0, 20)))
+        synthetic.append((f"Schedule {n}", n * dose, n))
+    for method in app.OPTIMIZATION_METHODS:
+        fitted = app.analyze(ab, -20, 20, 0.02, synthetic, method=method)
+        np.testing.assert_allclose(fitted["q"][fitted["idx"]], q, atol=2e-6, rtol=0)
+        assert fitted["ab"] == ab and np.all(fitted["q"] <= 0)
+    fitted = app.analyze(ab, -20, 0, 0.02, schedules)
+    detail = app.build_analysis({"name": "Inverse shoulder", "result": fitted})
+    app.run_robustness(detail)
+    app.export_analysis_tables(detail, folder / "negative-analysis", "json")
+    app.draw_dispersion_plot(Figure(), detail)
+    positive = app.analyze(1.5, -20, 20, 0.02, schedules)
+    assert np.all(positive["q"] >= 0) and positive["q"][0] == 0
+    assert app.evaluate(1.5, [1e12], schedules).min() > 0
+    mixed = app.analyze_selected(
+        [
+            {"name": "Positive", "alpha_beta": 1.5, "prescriptions": schedules},
+            {"name": "Negative", "alpha_beta": -5, "prescriptions": schedules},
+        ],
+        -20,
+        20,
+        0.05,
+    )
+    assert len(mixed["sets"]) == 2
+    app.export(mixed, folder / "mixed-signs")
+    crossing = app._profile_bounds(-5, -3, synthetic, 0.1, lower=-20, upper=0)
+    assert crossing[0] < -3 < crossing[1]
+    for q_crossing in crossing:
+        np.testing.assert_allclose(
+            app.evaluate(-5, [q_crossing], synthetic)[0].std(ddof=1),
+            0.105,
+            atol=1e-10,
+        )
+
+    # Existing positive-only databases must migrate without losing child rows.
+    path = folder / "old-positive-only.sqlite3"
+    with sqlite3.connect(path) as con:
+        con.executescript("""
+            CREATE TABLE tumors (id INTEGER PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                alpha_beta REAL NOT NULL CHECK (alpha_beta > 0));
+            CREATE TABLE prescriptions (id INTEGER PRIMARY KEY,
+                tumor_id INTEGER NOT NULL REFERENCES tumors(id) ON DELETE CASCADE,
+                name TEXT NOT NULL, total_gy REAL NOT NULL, fractions INTEGER NOT NULL,
+                position INTEGER NOT NULL, UNIQUE(tumor_id,name));
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO tumors VALUES (7,'Retained',1.5);
+            INSERT INTO prescriptions VALUES (11,7,'Reference',78,39,0);
+            INSERT INTO prescriptions VALUES (12,7,'Other',30,5,1);
+            INSERT INTO metadata VALUES ('default_prescriptions_sets_seeded','1');
+        """)
+    store = app.PrescriptionStore(path, app.DEFAULT_SETS)
+    assert len(store.list_sets()) == 1
+    assert store.get_set(7)["prescriptions"] == [("Reference", 78, 39), ("Other", 30, 5)]
+    store.update_alpha_beta(7, -5)
+    reopened = app.PrescriptionStore(path)
+    assert reopened.get_set(7)["alpha_beta"] == -5
+    app.export_prescriptions_set(reopened.get_set(7), folder / "signed.csv")
+    assert app.read_prescriptions_set_csv(folder / "signed.csv")["alpha_beta"] == -5
+    with reopened._connection() as con:
+        assert [row[0] for row in con.execute("SELECT id FROM prescriptions ORDER BY id")] == [
+            11,
+            12,
+        ]
+        assert not con.execute("PRAGMA foreign_key_check").fetchall()
+    reopened.delete_set(7)
+    with reopened._connection() as con:
+        assert con.execute("SELECT count(*) FROM prescriptions").fetchone()[0] == 0
+
+
 def check_gui(app, db_path, result):
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
@@ -85,6 +219,17 @@ def check_gui(app, db_path, result):
                 )
                 for text in ("Plot settings…", "Export image…"):
                     next(w for w in buttons if str(w.cget("text")) == text).invoke()
+                root.setvar(ab_entry.cget("textvariable"), "-2")
+                optimize.invoke()
+                row = results.item(results.get_children()[0], "values")
+                assert float(row[2]) == -2 and float(row[3]) <= 0
+                button("Save α/β").invoke()
+                assert (
+                    app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)["alpha_beta"]
+                    == -2
+                )
+                optimize.invoke()
+                button("Analysis…").invoke()
                 root.update_idletasks()
                 if failures:
                     raise RuntimeError("; ".join(failures))
@@ -151,6 +296,10 @@ def run_checks(report_path, include_gui=True):
             range_fit = app.analyze(1.5, 0.01, 50, 0.01, app.PROSTATE_PRESCRIPTIONS, method="range")
             assert np.isfinite(range_fit["spread"][range_fit["idx"]])
             passed("SSE, SD, and range optimization")
+            check_signed_model(app, folder)
+            passed(
+                "Signed fixed-ratio branches, zero limit, independent hazard integration, migration and exports"
+            )
 
             store = app.PrescriptionStore(folder / "prescriptions.sqlite3", app.DEFAULT_SETS)
             assert len(store.list_sets()) == 1, "Only prostate may be seeded by default"
@@ -204,7 +353,7 @@ def run_checks(report_path, include_gui=True):
             )
             state.sync(records)
             assert state.configured_set(prostate) == configured
-            for bad in ("", "0", "-1", "nan", "inf", "abc"):
+            for bad in ("", "0", "nan", "inf", "abc"):
                 state.alpha_beta_text[str(prostate["id"])] = bad
                 try:
                     state.configured_set(prostate)

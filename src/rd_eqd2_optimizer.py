@@ -25,16 +25,38 @@ import numpy as np
 import sympy as sp
 
 # Symbolically define the published therapeutic-range relationship.
-AB, Q, D, N = sp.symbols("alpha_over_beta D_q d n", positive=True, real=True)
-S = (sp.sqrt(1 + 2 * AB / Q) - 1) / AB
+AB, Q = sp.symbols("alpha_over_beta D_q", real=True)
+D, N = sp.symbols("d n", positive=True, real=True)
+S = sp.Piecewise(
+    ((sp.sqrt(1 + 2 * AB / Q) - 1) / AB, (AB > 0) & (Q > 0)),
+    ((-1 - sp.sqrt(1 + 2 * AB / Q)) / AB, (AB < 0) & (Q < 0)),
+    (sp.nan, True),
+)
 
 
 def _symbolic_fraction_effect(dose):
     return dose - Q * (1 - sp.exp(-S * dose))
 
 
-EQD2_EXPR = 2 * N * _symbolic_fraction_effect(D) / _symbolic_fraction_effect(sp.Integer(2))
-EQD2_FN = sp.lambdify((AB, Q, D, N), EQD2_EXPR, modules="numpy")
+EQD2_EXPR = sp.Piecewise(
+    (N * D, sp.Eq(Q, 0) & sp.Ne(AB, 0)),
+    (2 * N * _symbolic_fraction_effect(D) / _symbolic_fraction_effect(sp.Integer(2)), True),
+)
+_EQD2_SYMBOLIC_FN = sp.lambdify((AB, Q, D, N), EQD2_EXPR, modules="numpy")
+
+
+def EQD2_FN(ab, q, d, n):
+    """Evaluate the symbolic expression without evaluating its singular zero branch."""
+    ab, q, d, n = np.broadcast_arrays(*[np.asarray(x, dtype=float) for x in (ab, q, d, n)])
+    if np.any(~np.isfinite(ab)) or np.any(ab == 0):
+        raise ValueError("α/β must be a nonzero finite number.")
+    if np.any(~np.isfinite(q)) or np.any((q != 0) & (np.sign(q) != np.sign(ab))):
+        raise ValueError("Nonzero q must be finite and have the same sign as the fixed α/β.")
+    result = np.asarray(n * d).copy()
+    active = q != 0
+    result[active] = _EQD2_SYMBOLIC_FN(ab[active], q[active], d[active], n[active])
+    return result.item() if result.ndim == 0 else result
+
 
 # Established localized prostate-cancer schedules from the supplied manuscript table.
 # EQD2 is always recalculated from D, n and alpha/beta, not stored as a fixed input.
@@ -51,7 +73,7 @@ PROSTATE_PRESCRIPTIONS = [
     ("HYPO-RT-PC ultrahypofractionated", 42.70, 7),
     ("Fuller SBRT", 38.00, 4),
 ]
-DEFAULT_Q_START, DEFAULT_Q_END, DEFAULT_Q_STEP = 0.01, 50.0, 0.001
+DEFAULT_Q_START, DEFAULT_Q_END, DEFAULT_Q_STEP = -50.0, 50.0, 0.001
 
 # The sole built-in default; other prescriptions sets are saved or imported by the user.
 DEFAULT_SETS = {
@@ -89,7 +111,7 @@ class PrescriptionStore:
                 CREATE TABLE IF NOT EXISTS tumors (
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
-                    alpha_beta REAL NOT NULL CHECK (alpha_beta > 0)
+                    alpha_beta REAL NOT NULL CHECK (alpha_beta != 0)
                 );
                 CREATE TABLE IF NOT EXISTS prescriptions (
                     id INTEGER PRIMARY KEY,
@@ -103,6 +125,29 @@ class PrescriptionStore:
                 CREATE INDEX IF NOT EXISTS idx_prescriptions_tumor ON prescriptions(tumor_id, position);
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            # Rebuild only the parent table; keep IDs, prescriptions, and metadata intact.
+            schema = con.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tumors'"
+            ).fetchone()[0]
+            if "alpha_beta > 0" in schema:
+                con.execute("PRAGMA foreign_keys = OFF")
+                try:
+                    with con:
+                        con.execute("BEGIN")
+                        con.execute("""CREATE TABLE tumors_signed (
+                            id INTEGER PRIMARY KEY,
+                            name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                            alpha_beta REAL NOT NULL CHECK (alpha_beta != 0)
+                        )""")
+                        con.execute(
+                            "INSERT INTO tumors_signed SELECT id,name,alpha_beta FROM tumors"
+                        )
+                        con.execute("DROP TABLE tumors")
+                        con.execute("ALTER TABLE tumors_signed RENAME TO tumors")
+                finally:
+                    con.execute("PRAGMA foreign_keys = ON")
+                if con.execute("PRAGMA foreign_key_check").fetchone():
+                    raise sqlite3.IntegrityError("Invalid prescription references after migration.")
             marker = "default_prescriptions_sets_seeded"
             if (
                 seed_defaults
@@ -212,9 +257,9 @@ def validated_alpha_beta(value):
     try:
         ab = float(value)
     except (ValueError, TypeError) as exc:
-        raise ValueError("α/β must be a positive finite number.") from exc
-    if not math.isfinite(ab) or ab <= 0:
-        raise ValueError("α/β must be a positive finite number.")
+        raise ValueError("α/β must be a nonzero finite number.") from exc
+    if not math.isfinite(ab) or ab == 0:
+        raise ValueError("α/β must be a nonzero finite number.")
     return ab
 
 
@@ -295,35 +340,64 @@ def validate_schedules(schedules):
     return out
 
 
+def rd_parameters(ab, qgrid):
+    """Fixed-ratio RD branches. At q=0, r=0 and finite s is undetermined."""
+    ab = validated_alpha_beta(ab)
+    qgrid = np.asarray(qgrid, dtype=float)
+    if qgrid.size == 0 or np.any(~np.isfinite(qgrid)):
+        raise ValueError("All candidate q values must be finite.")
+    if np.any((qgrid != 0) & (np.sign(qgrid) != np.sign(ab))):
+        raise ValueError("Nonzero q must have the same sign as the fixed α/β to retain s > 0.")
+    s = np.full(qgrid.shape, np.nan)
+    active = qgrid != 0
+    magnitude = np.abs(qgrid[active])
+    sqrt_q = np.sqrt(magnitude)
+    root = np.hypot(sqrt_q, np.sqrt(2.0) * np.sqrt(abs(ab)))
+    s[active] = (2.0 / (sqrt_q + root)) / sqrt_q if ab > 0 else ((sqrt_q + root) / abs(ab)) / sqrt_q
+    reserve = np.zeros(qgrid.shape)
+    reserve[active] = qgrid[active] * s[active]
+    return reserve, s
+
+
+def fraction_bed(ab, qgrid, doses):
+    """Stable BED per fraction, including the continuous q=0 boundary."""
+    ab = validated_alpha_beta(ab)
+    qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
+    reserve, s = rd_parameters(ab, qgrid)
+    doses = np.atleast_1d(np.asarray(doses, dtype=float))
+    bed = np.broadcast_to(doses, (len(qgrid), len(doses))).copy()
+    active = qgrid != 0
+    t = s[active, None] * doses[None, :]
+    if ab > 0:
+        # 2(t - 1 + exp(-t))/t² tends to 1 without cancellation.
+        phi = np.empty_like(t)
+        small = t < 1e-3
+        x = t[small]
+        phi[small] = 1 + x * (-1 / 3 + x * (1 / 12 + x * (-1 / 60 + x / 360)))
+        x = t[~small]
+        phi[~small] = (2 / x) * (1 + np.expm1(-x) / x)
+        bed[active] = doses * (1 + doses / ab * phi)
+    else:
+        denominator = 1 - reserve[active, None]
+        bed[active] = doses / denominator + (-qgrid[active, None] / denominator) * (-np.expm1(-t))
+    return bed
+
+
 def evaluate(ab, qgrid, schedules):
     schedules = validate_schedules(schedules)
-    if not np.isfinite(ab) or ab <= 0:
-        raise ValueError("alpha/beta must be positive.")
-    qgrid = np.asarray(qgrid, dtype=float)
-    if qgrid.size == 0 or np.any(~np.isfinite(qgrid)) or np.any(qgrid <= 0):
-        raise ValueError("All candidate q values must be positive and finite.")
+    qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
     d = np.array([total / n for _, total, n in schedules], dtype=float)
     n = np.array([n for _, total, n in schedules], dtype=float)
-    # stable evaluation: 1-exp(-x) = -expm1(-x).
-    s = np.expm1(np.log1p(2 * ab / qgrid) / 2) / ab
-    # The above expression is EXACTLY sqrt(1 + 2ab/q) - 1, calculated stably.
-    f2 = 2 + qgrid * np.expm1(-2 * s)
-    fd = d[None, :] + qgrid[:, None] * np.expm1(-s[:, None] * d[None, :])
-    vals = 2 * n[None, :] * fd / f2[:, None]
-    return vals
+    bed = fraction_bed(ab, qgrid, np.concatenate(([2.0], d)))
+    return 2 * n[None, :] * bed[:, 1:] / bed[:, :1]
 
 
 def grid_values(start, stop, step):
     start = float(start)
     stop = float(stop)
     step = float(step)
-    if (
-        not all(np.isfinite(x) for x in (start, stop, step))
-        or start <= 0
-        or step <= 0
-        or stop < start
-    ):
-        raise ValueError("Use 0 < q start <= q end and a positive step.")
+    if not all(np.isfinite(x) for x in (start, stop, step)) or step <= 0 or stop < start:
+        raise ValueError("Use finite q start <= q end and a positive step.")
     count = math.floor((stop - start) / step + 1e-9) + 1
     if count > 200001:
         raise ValueError("Over 200,000 grid points; increase step.")
@@ -540,7 +614,7 @@ def _bounded_minimum(objective, left, right, iterations=90):
 def _profile_bounds(
     ab, optimum, schedules, minimum_value, fraction=0.05, criterion="sd", lower=1e-4, upper=1e3
 ):
-    """Find the profile's tolerance crossings by log-space bisection.
+    """Find the profile's tolerance crossings on signed intervals, including zero.
 
     SSE uses SD-profile bounds to retain the paper's established 5% SD
     definition. Range minimization uses a range-profile tolerance instead.
@@ -557,18 +631,22 @@ def _profile_bounds(
 
     def solve(lo, hi):
         flo, fhi = residual(lo), residual(hi)
+        if flo == 0:
+            return lo
+        if fhi == 0:
+            return hi
         if flo * fhi > 0:
             return None
         for _ in range(90):
-            middle = math.sqrt(lo * hi)
+            middle = lo + (hi - lo) / 2
             fm = residual(middle)
             if (flo <= 0) == (fm <= 0):
                 lo, flo = middle, fm
             else:
                 hi, fhi = middle, fm
-            if hi / lo - 1 < 1e-12:
+            if hi - lo < 1e-12 * max(1, abs(lo), abs(hi)):
                 break
-        return math.sqrt(lo * hi)
+        return lo + (hi - lo) / 2
 
     left = solve(lower, optimum) if optimum > lower else None
     right = solve(optimum, upper) if optimum < upper else None
@@ -606,7 +684,17 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
     if method not in OPTIMIZATION_METHODS:
         raise ValueError(f"Unknown optimization method: {method!r}")
     schedules = validate_schedules(schedules)
+    ab = validated_alpha_beta(ab)
     q = grid_values(start, stop, step)
+    # A shared signed interval can optimize sets of either sign independently.
+    q = q[(q >= 0) if ab > 0 else (q <= 0)]
+    if float(start) <= 0 <= float(stop):
+        q = np.unique(np.append(q, 0.0))
+    if not len(q):
+        raise ValueError(
+            "The search interval has no q values compatible with the fixed α/β. "
+            "Use q >= 0 for positive α/β or q <= 0 for negative α/β."
+        )
     z = evaluate(ab, q, schedules)
     statistics = _profile_statistics(z)
     objective_key = {"range": "spread", "sd": "sample_sd", "sse": "sse"}[method]
@@ -735,7 +823,9 @@ def export(result, folder):
             aligned = []
             for dataset in datasets:
                 r = dataset["result"]
-                eqd2 = evaluate(r["ab"], common_q, r["schedules"])
+                compatible = (common_q >= 0) if r["ab"] > 0 else (common_q <= 0)
+                eqd2 = np.full((len(common_q), len(r["schedules"])), np.nan)
+                eqd2[compatible] = evaluate(r["ab"], common_q[compatible], r["schedules"])
                 means = eqd2.mean(axis=1)
                 aligned.append(
                     (
@@ -752,7 +842,8 @@ def export(result, folder):
                 for eqd2, means, sd, sample_sd, sse, spread in aligned:
                     values += [means[i], sd[i], sample_sd[i], sse[i], spread[i]]
                     values += list(eqd2[i])
-                w.writerow(values)
+                # Blank cells denote the other sign's inadmissible branch.
+                w.writerow([value if np.isfinite(value) else None for value in values])
     with (folder / "optimal_schedules.csv").open("w", newline="", encoding="utf-8-sig") as fp:
         w = csv.writer(fp)
         if multi and len(datasets) > 1:
@@ -969,11 +1060,11 @@ def read_prescriptions_set_csv(path):
                         ab = float(ab)
                     except ValueError as exc:
                         raise ValueError(
-                            f"CSV line {line}: alpha_beta must be a positive number."
+                            f"CSV line {line}: alpha_beta must be a nonzero finite number."
                         ) from exc
-                    if not math.isfinite(ab) or ab <= 0:
+                    if not math.isfinite(ab) or ab == 0:
                         raise ValueError(
-                            f"CSV line {line}: alpha_beta must be a positive finite number."
+                            f"CSV line {line}: alpha_beta must be a nonzero finite number."
                         )
                     alpha_betas.append(ab)
     except (csv.Error, UnicodeError) as exc:
@@ -1231,6 +1322,27 @@ def _t95(df):
 
 def _distribution(values, doses):
     values, doses = np.asarray(values, float), np.asarray(doses, float)
+    if not np.all(np.isfinite(values)):
+        return dict(
+            N=len(values),
+            **dict.fromkeys(
+                (
+                    "mean",
+                    "SD",
+                    "RSD",
+                    "minimum",
+                    "maximum",
+                    "full_range",
+                    "SSE",
+                    "intercept",
+                    "slope",
+                    "delta_trend",
+                    "eta",
+                    "CI95_lower",
+                    "CI95_upper",
+                )
+            ),
+        )
     mean, sd = float(values.mean()), float(values.std(ddof=1))
     x = doses - doses.mean()
     denominator = float(x @ x)
@@ -1242,7 +1354,7 @@ def _distribution(values, doses):
         "N": len(values),
         "mean": mean,
         "SD": sd,
-        "RSD": 100 * sd / mean,
+        "RSD": 100 * sd / abs(mean) if mean != 0 else None,
         "minimum": float(values.min()),
         "maximum": float(values.max()),
         "full_range": float(np.ptp(values)),
@@ -1250,7 +1362,7 @@ def _distribution(values, doses):
         "intercept": intercept,
         "slope": slope,
         "delta_trend": delta,
-        "eta": 100 * delta / mean if delta is not None else None,
+        "eta": 100 * delta / abs(mean) if delta is not None and mean != 0 else None,
         "CI95_lower": mean - half,
         "CI95_upper": mean + half,
     }
@@ -1261,13 +1373,16 @@ def build_analysis(dataset):
     r = dataset["result"]
     i, ab = r["idx"], r["ab"]
     dq = float(r["q"][i])
-    s = 2 / (dq * (math.sqrt(1 + 2 * ab / dq) + 1))
-    reserve = s * dq
+    reserves, rates = rd_parameters(ab, np.array([dq]))
+    reserve = float(reserves[0])
+    s = float(rates[0]) if dq != 0 else None
+    beds = fraction_bed(ab, [dq], [total / n for _, total, n in r["schedules"]])[0]
     prescriptions = []
-    for (name, total, n), eqd2 in zip(r["schedules"], r["eqd2"][i]):
+    for (name, total, n), eqd2, per_fraction_bed in zip(r["schedules"], r["eqd2"][i], beds):
         d = total / n
-        bed = n * (d + dq * math.expm1(-s * d)) / (1 - reserve)
+        bed = n * per_fraction_bed
         lq_bed = total * (1 + d / ab)
+        lq_eqd2 = total * (ab + d) / (ab + 2) if ab != -2 else None
         prescriptions.append(
             {
                 "prescription": name,
@@ -1277,9 +1392,9 @@ def build_analysis(dataset):
                 "RD_BED_Gy": bed,
                 "RD_EQD2_Gy": float(eqd2),
                 "LQ_BED_Gy": lq_bed,
-                "LQ_EQD2_Gy": total * (ab + d) / (ab + 2),
+                "LQ_EQD2_Gy": lq_eqd2,
                 "RD_deviation_Gy": float(eqd2 - r["mean"][i]),
-                "RD_minus_LQ_Gy": float(eqd2 - total * (ab + d) / (ab + 2)),
+                "RD_minus_LQ_Gy": float(eqd2 - lq_eqd2) if lq_eqd2 is not None else None,
             }
         )
     doses = [p["d_Gy"] for p in prescriptions]
@@ -1394,8 +1509,9 @@ def run_robustness(a, alpha_beta_values=None):
         a["alpha_beta"],
         a["alpha_beta"] * 4 / 3,
     ]:
-        if not math.isfinite(ab) or ab <= 0:
-            raise ValueError("Sensitivity α/β values must be positive finite numbers.")
+        ab = validated_alpha_beta(ab)
+        if np.sign(ab) != np.sign(a["alpha_beta"]):
+            raise ValueError("Sensitivity α/β values must retain the fitted branch's sign.")
         fitted = analyze(ab, start, stop, step, rows, method=a["method"], bound_pct=a["bound_pct"])
         detail = build_analysis({"name": a["name"], "result": fitted})
         sensitivity.append(
@@ -1579,6 +1695,7 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     d = np.array([p["d_Gy"] for p in rows])
     rd = np.array([p["RD_EQD2_Gy"] for p in rows])
     lq = np.array([p["LQ_EQD2_Gy"] for p in rows])
+    show_lq = show_lq and a["models"]["LQ"]["mean"] is not None
     stats = a["models"]["RD"]
     blue = "#1f77b4"
     orange = "#d95f02"
@@ -1632,7 +1749,8 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     high = max(float(visible.max()), stats["mean"] + stats["SD"], reference or 0)
     # Preserve the supplied 0--140 Gy prostate view; expand for other sets.
     upper = max(140.0, 20.0 * math.ceil(high * 1.08 / 20.0))
-    ax.set_ylim(0, upper)
+    lower = min(0.0, 20.0 * math.floor(float(visible.min()) * 1.08 / 20.0))
+    ax.set_ylim(lower, upper)
     if float(np.ptp(d)) <= 10:
         ax.xaxis.set_major_locator(MultipleLocator(1.0))
     else:
@@ -2015,7 +2133,7 @@ def open_analysis_window(parent, result):
         try:
             values = [float(v.strip()) for v in ab_values.get().split(",") if v.strip()]
             if not values:
-                raise ValueError("Enter at least one positive α/β value.")
+                raise ValueError("Enter at least one nonzero finite α/β value.")
             window.configure(cursor="watch")
             window.update_idletasks()
             run_robustness(current(), values)
@@ -2238,6 +2356,11 @@ def launch_gui(db_path=None):
         text="Bounds use sample EQD2 SD for SSE/SD optimization, or EQD2 range for range optimization.",
         foreground="#555555",
     ).grid(row=2, column=0, columnspan=5, sticky="w", padx=7, pady=(6, 0))
+    ttk.Label(
+        controls,
+        text="α/β stays fixed: positive values use q ≥ 0; negative values use q ≤ 0. At q = 0, EQD2 = D.",
+        foreground="#555555",
+    ).grid(row=3, column=0, columnspan=5, sticky="w", padx=7, pady=(3, 0))
 
     setbox = ttk.LabelFrame(panel, text="Prescriptions sets — select sets to optimize", padding=8)
     setbox.pack(fill="x", pady=(8, 4))
@@ -3017,7 +3140,7 @@ def launch_gui(db_path=None):
             mark(name_entry, not set_name.get().strip())
             try:
                 ab = float(alpha_beta.get())
-                ab_bad = not math.isfinite(ab) or ab <= 0
+                ab_bad = not math.isfinite(ab) or ab == 0
             except ValueError:
                 ab_bad = True
             mark(ab_entry, ab_bad)
@@ -3042,7 +3165,7 @@ def launch_gui(db_path=None):
             if not valid:
                 messagebox.showerror(
                     "Required fields",
-                    "Fill every field. α/β and D must be positive numbers, and n must be a positive integer. Invalid fields are highlighted.",
+                    "Fill every field. α/β must be finite and nonzero, D must be positive, and n must be a positive integer. Invalid fields are highlighted.",
                     parent=dialog,
                 )
                 return
@@ -3309,7 +3432,7 @@ def main():
         "--ab",
         type=float,
         default=None,
-        help="fixed alpha/beta override (Gy); stored set value used with --set",
+        help="fixed finite nonzero alpha/beta override (Gy); stored set value used with --set",
     )
     parser.add_argument("--dq-start", type=float, default=DEFAULT_Q_START)
     parser.add_argument("--dq-end", type=float, default=DEFAULT_Q_END)

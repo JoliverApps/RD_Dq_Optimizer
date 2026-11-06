@@ -1,40 +1,56 @@
 # Validation
 
-Code cleanup completed on 30 October 2026. The standalone `rd_eqd2_optimizer.py` and the application in this project contain identical code.
+Signed fixed-ratio RD calibration verified on 6 November 2026. The application
+keeps each set's finite nonzero α/β fixed and optimizes only q on its compatible
+branch, including the continuous linear-survival boundary at q = 0.
 
 Application SHA-256:
 
 ```text
-029739b78bc7f77069c44ef235f59e024f947dbeaf7413b5ab72e7201d31e8ed
+d7066a9be78631ac1447d344004f67fe44cdb44d5827a4b7248888340aa4d267
 ```
-
-## Cleanup
-
-- Standard Python formatting, sorted imports, and consistent prescriptions-set names.
-- Removed unused text parsers, compatibility wrappers, unused plot variables, and the obsolete hidden command-line alias.
-- Shared alpha/beta, prescription, and image-resolution validation.
-- Shared profile statistics and dispersion evaluation, replacing duplicate optimization code.
-- Shared build-environment setup and streamed file hashing.
-- Added `pyproject.toml` for formatting and lint rules.
-
-The application remains a single Python file. Prostate remains the only built-in default. Saved database files and older CSV header formats remain supported.
 
 ## Completed checks
 
 | Check | Result |
 | --- | --- |
-| Ruff lint and formatting checks | Passed for the standalone file and project Python files |
-| Python 3.9 syntax compatibility | Passed |
-| Standalone/project source equality and project file paths | Passed |
-| Numerical comparison with the pre-cleanup application | Exact equality across 21 cases covering all three objectives, alpha/beta changes, prescription subsets, identical fraction doses, and boundary minima |
-| Analysis and robustness comparison | Exact equality |
-| Optimization CSV exports | Byte-identical |
-| Profile and dispersion PNG plots | Pixel-identical |
-| Saved database created by the previous code | Read correctly by the cleaned storage API |
-| Full runtime and GUI integration checks | Passed on Linux with a virtual display |
-| Portable build helpers | Environment isolation and file checksums verified |
-| Windows executable build | Not run in this Linux environment; the Windows build runs source and executable checks automatically |
+| Ruff lint and formatting | Passed for `src` and `tools` |
+| Python bytecode compilation | Passed |
+| Full source runtime suite without GUI | Passed, all 12 check groups |
+| Positive and inverse-shoulder EQD2 | Matched independently integrated hazards to relative tolerance 2 × 10⁻¹³ |
+| Signed symbolic expression and numerical mapping | Both branches matched known r and s values |
+| q = 0 and one-sided limits | EQD2 = D exactly at zero; nearby values converge from each compatible branch |
+| Zero-boundary analysis | BED = D, r = 0, s unavailable; JSON and plots succeed |
+| Negative synthetic isoeffective set | SSE, SD, and range recover q = −3 Gy within 2 × 10⁻⁶ Gy at fixed α/β = −5 Gy |
+| Signed profile bounds | Negative crossings bracket the optimum and match the specified SD tolerance |
+| Mixed-sign sets | Independently optimized and exported on compatible candidate domains; opposite-branch CSV cells are blank |
+| Old positive-only SQLite schema | Migrated with set IDs, prescription IDs, metadata, and foreign-key relationships preserved |
+| Negative saved ratios | Save, reopen, CSV round trip, and cascading deletion passed |
+| Negative analysis and robustness | Passed, including JSON export and dispersion plots |
+| α/β = −2 Gy | RD remains available; undefined LQ EQD2 comparisons are marked unavailable |
+| Command-line negative-ratio export | Passed at α/β = −2 Gy over q ∈ [−10, 0] |
+| Original prostate calibration | Preserved within the existing baseline tolerance |
+| GUI interaction | Not run in this environment; no graphical display is available |
+| Windows executable build | Not run in this Linux environment |
 
-Runtime checks cover prostate-only initialization, saved-data preservation, checkbox selection, main-page alpha/beta editing and saving, switching sets, CSV set export/import, detailed analysis, robustness, plot settings, and image exports.
+The prostate baseline remains Dq ≈ 3.54386 Gy, mean EQD2 ≈ 75.81790 Gy, and
+RSD ≈ 2.83660%. The runtime suite checks these against the original calibration
+with absolute tolerance 2 × 10⁻⁵.
 
-The full prostate set at alpha/beta = 1.5 Gy retains Dq = 3.543859355746318 Gy, mean EQD2 = 75.81790297672867 Gy, and RSD = 2.8365977004593472%.
+The existing suite also verifies prostate-only initialization, saved-set
+preservation, prescription selection, independent α/β drafts, CSV imports,
+all three objectives, analysis and robustness tables, CSV/TSV/JSON/LaTeX
+exports, image formats, combined-set exports, and plot preferences.
+
+Reproduce the headless checks with:
+
+```text
+python -m ruff check src tools
+python -m ruff format --check src tools
+python -m compileall -q src tools
+python src/main.py --self-test signed-validation.json --no-gui
+```
+
+The GUI integration checks have been extended to enter, optimize, save, and
+analyze a negative ratio. Windows builds still require both source and packaged
+executable checks, including GUI interaction, before reporting build success.
