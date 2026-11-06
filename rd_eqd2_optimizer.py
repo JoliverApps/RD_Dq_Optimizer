@@ -29,12 +29,8 @@ AB = sp.symbols("alpha_over_beta", positive=True, real=True)
 Q = sp.symbols("D_q", real=True)
 D, N = sp.symbols("d n", positive=True, real=True)
 SIGNED_AB = sp.Piecewise((AB, Q >= 0), (-AB, True))
-RD_ROOT = sp.sqrt(1 + 2 * SIGNED_AB / Q)
-S = sp.Piecewise(
-    ((RD_ROOT - 1) / SIGNED_AB, Q > 0),
-    ((-1 - RD_ROOT) / SIGNED_AB, Q < 0),
-    (sp.nan, True),
-)
+R = (sp.sqrt(Q**2 + 2 * Q * SIGNED_AB) - Q) / SIGNED_AB
+S = sp.Piecewise((R / Q, sp.Ne(Q, 0)), (sp.nan, True))
 
 
 def _symbolic_fraction_effect(dose):
@@ -56,22 +52,12 @@ def EQD2_FN(ab, q, d, n):
     if np.any(~np.isfinite(q)):
         raise ValueError("Candidate q values must be finite.")
     result = np.empty(ab.shape)
-    for ratio in np.unique(ab):
-        selected = ab == ratio
-        _, rates = rd_parameters(float(ratio), q[selected])
-        per_fraction = _fraction_bed_values(float(ratio), q[selected], rates, d[selected])
-        reference = _fraction_bed_values(float(ratio), q[selected], rates, 2.0)
-        values = 2 * n[selected] * per_fraction / reference
-        # Near zero the unnormalized effects avoid cancelling a shared square-root term.
-        near = (q[selected] != 0) & (np.abs(q[selected]) <= 0.25 * np.minimum(d[selected], 2.0))
-        near_q, near_d, near_s = q[selected][near], d[selected][near], rates[near]
-        values[near] = (
-            2
-            * n[selected][near]
-            * (near_d + near_q * np.expm1(-near_s * near_d))
-            / (2 + near_q * np.expm1(-2 * near_s))
-        )
-        result[selected] = values
+    for input_ab in np.unique(ab):
+        selected = ab == input_ab
+        branch_ab, reserve, rates = _signed_rd_parameters(float(input_ab), q[selected])
+        effect = _fraction_effect_values(q[selected], branch_ab, reserve, rates, d[selected])
+        reference = _fraction_effect_values(q[selected], branch_ab, reserve, rates, 2.0)
+        result[selected] = (effect / reference) * (2 * n[selected])
     return result.item() if result.ndim == 0 else result
 
 
@@ -334,70 +320,75 @@ def validate_schedules(schedules):
     return out
 
 
-def rd_parameters(ab, qgrid):
-    """Select the signed α/β branch directly from q."""
+def _signed_rd_parameters(ab, qgrid):
+    """Apply q's sign to α/β, reconstruct r, then calculate s=r/q."""
     ab = validated_alpha_beta(ab)
     qgrid = np.asarray(qgrid, dtype=float)
     if qgrid.size == 0 or np.any(~np.isfinite(qgrid)):
         raise ValueError("All candidate q values must be finite.")
-    s = np.full(qgrid.shape, np.nan)
-    active = qgrid != 0
-    q_values = qgrid[active]
-    positive = q_values > 0
-    branch_ab = np.where(positive, ab, -ab)
-    q_scale = np.where(positive, q_values, -q_values)
-    sqrt_q = np.sqrt(q_scale)
-    root = np.hypot(sqrt_q, np.sqrt(2.0) * np.sqrt(ab))
-    rates = np.empty_like(q_values)
-    rates[positive] = (2.0 / (sqrt_q[positive] + root[positive])) / sqrt_q[positive]
-    rates[~positive] = (
-        -((sqrt_q[~positive] + root[~positive]) / branch_ab[~positive]) / sqrt_q[~positive]
-    )
-    s[active] = rates
+    branch_ab = np.where(qgrid < 0, -ab, ab)
     reserve = np.zeros(qgrid.shape)
-    reserve[active] = qgrid[active] * s[active]
-    return reserve, s
+    rates = np.full(qgrid.shape, np.nan)
+    active = qgrid != 0
+    q, a = qgrid[active], branch_ab[active]
+    root = np.hypot(q, np.sqrt(2.0) * np.sqrt(q * a))
+    r = np.empty_like(q)
+    positive = q > 0
+    # Rationalize the same signed r expression where its numerator would cancel.
+    r[positive] = 2 * q[positive] / (root[positive] + q[positive])
+    r[~positive] = (root[~positive] - q[~positive]) / a[~positive]
+    reserve[active] = r
+    rates[active] = r / q
+    return branch_ab, reserve, rates
 
 
-def _fraction_bed_values(ab, qgrid, s, doses):
-    """Compute paired or broadcast fraction effects from a valid RD branch."""
-    qgrid, s, doses = np.broadcast_arrays(qgrid, s, doses)
-    bed = np.array(doses, dtype=float, copy=True)
-    positive, negative = qgrid > 0, qgrid < 0
-    if np.any(positive):
-        d = doses[positive]
-        t = s[positive] * d
-        # 2(t - 1 + exp(-t))/t² tends to 1 without cancellation.
-        phi = np.empty_like(t)
+def rd_parameters(ab, qgrid):
+    """Return r and s for the signed α/β and q values."""
+    _, reserve, rates = _signed_rd_parameters(ab, qgrid)
+    return reserve, rates
+
+
+def _initial_hazard_factor(q, branch_ab, reserve, rates):
+    """Evaluate α/k=1-r, retaining precision as r approaches one."""
+    q, branch_ab, reserve, rates = np.broadcast_arrays(q, branch_ab, reserve, rates)
+    factor = np.ones(q.shape)
+    positive, negative = q > 0, q < 0
+    factor[positive] = branch_ab[positive] * reserve[positive] * rates[positive] / 2
+    factor[negative] = 1 - reserve[negative]
+    return factor
+
+
+def _fraction_effect_values(q, branch_ab, reserve, rates, doses):
+    """Evaluate H/k=d-q(1-exp(-sd)) using the signed RD parameters."""
+    q, branch_ab, reserve, rates, doses = np.broadcast_arrays(q, branch_ab, reserve, rates, doses)
+    effect = np.array(doses, dtype=float, copy=True)
+    direct = (q < 0) | ((q > 0) & (q <= 0.25 * doses))
+    effect[direct] = doses[direct] + q[direct] * np.expm1(-rates[direct] * doses[direct])
+    stable = (q > 0) & ~direct
+    if np.any(stable):
+        d, r, s = doses[stable], reserve[stable], rates[stable]
+        t = s * d
+        remainder = np.empty_like(t)
         small = t < 1e-2
         x = t[small]
-        phi[small] = 1 + x * (-1 / 3 + x * (1 / 12 + x * (-1 / 60 + x / 360)))
+        remainder[small] = x * (1 / 2 + x * (-1 / 6 + x * (1 / 24 + x * (-1 / 120 + x / 720))))
         x = t[~small]
-        phi[~small] = (2 / x) * (1 + np.expm1(-x) / x)
-        bed[positive] = d * (1 + d / ab * phi)
-    if np.any(negative):
-        d, rates = doses[negative], s[negative]
-        t = rates * d
-        q_scale = -qgrid[negative]
-        weight = np.empty_like(q_scale)
-        inverse = np.empty_like(q_scale)
-        large = q_scale > 1
-        weight[large] = 1 / (rates[large] + 1 / q_scale[large])
-        inverse[large] = weight[large] / q_scale[large]
-        denominator = 1 + q_scale[~large] * rates[~large]
-        weight[~large] = q_scale[~large] / denominator
-        inverse[~large] = 1 / denominator
-        bed[negative] = d * inverse + weight * (-np.expm1(-t))
-    return bed
+        remainder[~small] = 1 + np.expm1(-x) / x
+        factor = _initial_hazard_factor(q[stable], branch_ab[stable], r, s)
+        effect[stable] = factor * d + r * d * remainder
+    return effect
 
 
 def fraction_bed(ab, qgrid, doses):
-    """Stable BED per fraction, including the continuous q=0 boundary."""
-    ab = validated_alpha_beta(ab)
+    """Normalize the signed RD fraction effect by α/k=1-r."""
     qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
-    _, s = rd_parameters(ab, qgrid)
+    branch_ab, reserve, rates = _signed_rd_parameters(ab, qgrid)
     doses = np.atleast_1d(np.asarray(doses, dtype=float))
-    return _fraction_bed_values(ab, qgrid[:, None], s[:, None], doses[None, :])
+    effect = _fraction_effect_values(
+        qgrid[:, None], branch_ab[:, None], reserve[:, None], rates[:, None], doses[None, :]
+    )
+    factor = _initial_hazard_factor(qgrid, branch_ab, reserve, rates)
+    return effect / factor[:, None]
 
 
 def evaluate(ab, qgrid, schedules):

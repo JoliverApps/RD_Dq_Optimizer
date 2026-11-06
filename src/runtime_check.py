@@ -273,6 +273,45 @@ def check_full_signed_profile(app, folder):
     assert sum(float(row["Dq_Gy"]) == 0 for row in rows) == 1
 
 
+def check_signed_reconstruction(app):
+    """Recover classical descriptors from primitive r,s,k, retaining their signs."""
+    import numpy as np
+
+    for r in (-3.0, -0.8, -0.01, 0.2, 0.8):
+        for s in (0.05, 0.3, 2.0):
+            for k in (0.01, 1.0, 4.0):
+                d0 = 1 / k
+                alpha = k * (1 - r)
+                beta = k * r * s / 2
+                q = r / s
+                actual_ab = alpha / beta
+                input_ab = actual_ab if q > 0 else -actual_ab
+                branch_ab, recovered_r, recovered_s = app._signed_rd_parameters(input_ab, [q])
+                np.testing.assert_allclose(
+                    [branch_ab[0], recovered_r[0], recovered_s[0]], [actual_ab, r, s], rtol=1e-12
+                )
+                direct_r = (np.sqrt(q * q + 2 * q * actual_ab) - q) / actual_ab
+                np.testing.assert_allclose(recovered_r[0], direct_r, rtol=1e-12)
+                np.testing.assert_allclose(recovered_s[0], direct_r / q, rtol=1e-12)
+                np.testing.assert_allclose((1 - alpha * d0) ** 2 / (2 * q * d0), beta, rtol=1e-12)
+                assert d0 > 0 and alpha > 0 and recovered_s[0] > 0
+                if q < 0:
+                    assert branch_ab[0] < 0 and recovered_r[0] < 0 and beta < 0
+                else:
+                    assert branch_ab[0] > 0 and 0 < recovered_r[0] < 1 and beta > 0
+                doses = np.array([0.01, 2.0, 8.0])
+                hazard = k * (doses + q * np.expm1(-s * doses))
+                np.testing.assert_allclose(
+                    app.fraction_bed(input_ab, [q], doses)[0], hazard / alpha, rtol=1e-12
+                )
+                expected_eqd2 = 10 * hazard / hazard[1]
+                np.testing.assert_allclose(
+                    app.EQD2_FN(input_ab, q, doses, 5), expected_eqd2, rtol=1e-12
+                )
+    _, rates = app.rd_parameters(10, [-2, 2])
+    assert rates[0] > rates[1] > 0
+
+
 def check_gui(app, db_path, result):
     import tkinter as tk
     import traceback
@@ -525,6 +564,8 @@ def run_checks(report_path, include_gui=True):
             )
             check_full_signed_profile(app, folder)
             passed("Full 15-prescription NSCLC profile, q-dependent signs, and smooth unique zero")
+            check_signed_reconstruction(app)
+            passed("Primitive RD parameters, signed classical descriptors, and direct H/BED/EQD2")
 
             store = app.PrescriptionStore(folder / "prescriptions.sqlite3", app.DEFAULT_SETS)
             assert len(store.list_sets()) == 1, "Only prostate may be seeded by default"
