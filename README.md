@@ -1,6 +1,6 @@
 # RD EQD2 Optimizer
 
-RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). Each prescriptions set has a fixed α/β value.
+RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). Each prescriptions set has a fixed α/β magnitude.
 
 The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing eight prescriptions at α/β = 1.5 Gy is available on first launch.
 
@@ -30,7 +30,7 @@ python rd_eqd2_optimizer.py
 
 1. Select the prescriptions sets to analyze.
 2. Choose a set to view its prescriptions. Check the **Optimize** boxes for the prescriptions to include. Each selected set needs at least two prescriptions.
-3. Enter **α/β (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
+3. Enter **|α/β| (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
 4. Set **q start**, **q end**, and **q step**, then choose a minimization criterion.
 5. Click **Run optimization**.
 
@@ -38,15 +38,14 @@ Each selected set is optimized independently. Prescription checkboxes control th
 
 ### Parameters and search interval
 
-α/β must be finite and nonzero. It remains fixed during optimization. The candidate parameter q represents the shoulder displacement, and its fitted value is reported as Dq.
+The α/β magnitude must be finite and nonzero. It remains fixed during optimization. The candidate parameter q represents the shoulder displacement, and its fitted value is reported as Dq. The sign of α/β follows q.
 
-| Fixed α/β | Search domain |
+| Candidate q | α/β sign |
 | --- | --- |
-| Positive | q ≥ 0 |
-| Negative | q ≤ 0 |
-| Either sign at q = 0 | BED and EQD2 equal the physical dose |
+| q ≥ 0 | Positive |
+| q < 0 | Negative |
 
-The default interval is −50 to +50 Gy with a step of 0.001 Gy. Each set uses the part of the interval compatible with its α/β value. Zero is included when the interval spans zero.
+The default interval is −50 to +50 Gy with a step of 0.001 Gy. The optimizer evaluates the full selected interval. Zero is included once when the interval spans zero; at zero, BED and EQD2 equal the physical dose.
 
 Use a smaller step for a finer grid. If the application reports too many grid points, increase the step or narrow the interval.
 
@@ -64,7 +63,7 @@ Use a smaller step for a finer grid. If the application reports too many grid po
 
 The results table reports Dq, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
 
-A minimum marked **BOUNDARY** lies at an endpoint of the search interval. A wider compatible interval may help locate an interior minimum. **Outside search** means that the selected interval does not contain both profile-bound crossings.
+A minimum marked **BOUNDARY** lies at an endpoint of the search interval. A wider interval may help locate an interior minimum. **Outside search** means that the selected interval does not contain both profile-bound crossings.
 
 Click **Analysis…** for:
 
@@ -81,7 +80,7 @@ For α/β = −2 Gy, LQ EQD2 is unavailable because its reference denominator is
 
 Open the **Robustness** tab in the analysis window and click **Run robustness**. Leave-one-out analysis requires at least three prescriptions.
 
-To assess α/β sensitivity, enter comma-separated values with the same sign as the fitted set's α/β. Each value is held fixed during its own optimization.
+To assess α/β sensitivity, enter comma-separated nonzero magnitudes. Each magnitude is held fixed during its own optimization.
 
 ## Manage prescriptions sets
 
@@ -97,7 +96,7 @@ The CSV columns are:
 | `total_gy` | Total dose in Gy |
 | `fractions` | Number of fractions |
 | `prescriptions_set` | Set name |
-| `alpha_beta` | Fixed α/β in Gy |
+| `alpha_beta` | Fixed α/β magnitude in Gy |
 
 The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
 
@@ -108,7 +107,6 @@ The first three columns are required for import. A file must describe one prescr
 - **Plot settings…** controls titles, labels, fonts, colors, dimensions, and axis limits.
 - The analysis window exports tables as CSV, TSV, JSON, or LaTeX, and dispersion plots as PNG, JPEG, EPS, PDF, or SVG.
 
-When a combined export contains sets with positive and negative α/β values, blank cells mark candidate q values outside a set's domain.
 
 ## Command-line use
 
@@ -124,10 +122,10 @@ Analyze a CSV file:
 python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab 1.5 --dq-start 0 --dq-end 50 --dq-step 0.01 --out results
 ```
 
-Analyze a negative-α/β set:
+Search across positive and negative q:
 
 ```text
-python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab=-5 --dq-start=-50 --dq-end=0 --out results
+python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab 10 --dq-start=-50 --dq-end=50 --out results
 ```
 
 Use `--set "Set name"` to select a saved prescriptions set. Use `--method sse`, `--method sd`, or `--method range` to choose the criterion. Use `--db` to select a prescriptions database. Run `python rd_eqd2_optimizer.py --help` for all options.
@@ -176,6 +174,5 @@ A Release build produces a single executable. A Debug build produces `dist\Debug
 | --- | --- |
 | Missing NumPy, Matplotlib, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
 | Tkinter is unavailable | Install Tcl/Tk support for the selected Python interpreter. |
-| No compatible q values | Use an interval containing nonnegative q for positive α/β, or nonpositive q for negative α/β. |
 | Too many grid points | Increase q step or narrow the interval. |
 | A Windows executable reports a startup error | Check `application.log` in the data folder. |

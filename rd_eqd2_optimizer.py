@@ -28,8 +28,8 @@ import sympy as sp
 AB, Q = sp.symbols("alpha_over_beta D_q", real=True)
 D, N = sp.symbols("d n", positive=True, real=True)
 S = sp.Piecewise(
-    ((sp.sqrt(1 + 2 * AB / Q) - 1) / AB, (AB > 0) & (Q > 0)),
-    ((-1 - sp.sqrt(1 + 2 * AB / Q)) / AB, (AB < 0) & (Q < 0)),
+    ((sp.sqrt(1 + 2 * sp.Abs(AB) / sp.Abs(Q)) - 1) / sp.Abs(AB), Q > 0),
+    ((1 + sp.sqrt(1 + 2 * sp.Abs(AB) / sp.Abs(Q))) / sp.Abs(AB), Q < 0),
     (sp.nan, True),
 )
 
@@ -50,15 +50,26 @@ def EQD2_FN(ab, q, d, n):
     ab, q, d, n = np.broadcast_arrays(*[np.asarray(x, dtype=float) for x in (ab, q, d, n)])
     if np.any(~np.isfinite(ab)) or np.any(ab == 0):
         raise ValueError("α/β must be a nonzero finite number.")
-    if np.any(~np.isfinite(q)) or np.any((q != 0) & (np.sign(q) != np.sign(ab))):
-        raise ValueError("Nonzero q must be finite and have the same sign as the fixed α/β.")
+    if np.any(~np.isfinite(q)):
+        raise ValueError("Candidate q values must be finite.")
+    ab = np.abs(ab)
     result = np.empty(ab.shape)
     for ratio in np.unique(ab):
         selected = ab == ratio
         _, rates = rd_parameters(float(ratio), q[selected])
         per_fraction = _fraction_bed_values(float(ratio), q[selected], rates, d[selected])
         reference = _fraction_bed_values(float(ratio), q[selected], rates, 2.0)
-        result[selected] = 2 * n[selected] * per_fraction / reference
+        values = 2 * n[selected] * per_fraction / reference
+        # Near zero the unnormalized effects avoid cancelling a shared square-root term.
+        near = (q[selected] != 0) & (np.abs(q[selected]) <= 0.25 * np.minimum(d[selected], 2.0))
+        near_q, near_d, near_s = q[selected][near], d[selected][near], rates[near]
+        values[near] = (
+            2
+            * n[selected][near]
+            * (near_d + near_q * np.expm1(-near_s * near_d))
+            / (2 + near_q * np.expm1(-2 * near_s))
+        )
+        result[selected] = values
     return result.item() if result.ndim == 0 else result
 
 
@@ -152,6 +163,7 @@ class PrescriptionStore:
                     con.execute("PRAGMA foreign_keys = ON")
                 if con.execute("PRAGMA foreign_key_check").fetchone():
                     raise sqlite3.IntegrityError("Invalid prescription references after migration.")
+            con.execute("UPDATE tumors SET alpha_beta=ABS(alpha_beta) WHERE alpha_beta < 0")
             marker = "default_prescriptions_sets_seeded"
             if (
                 seed_defaults
@@ -163,7 +175,7 @@ class PrescriptionStore:
                         continue
                     cursor = con.execute(
                         "INSERT INTO tumors (name,alpha_beta) VALUES (?,?)",
-                        (name, dataset["alpha_beta"]),
+                        (name, validated_alpha_beta(dataset["alpha_beta"])),
                     )
                     con.executemany(
                         "INSERT INTO prescriptions (tumor_id,name,total_gy,fractions,position) VALUES (?,?,?,?,?)",
@@ -264,7 +276,7 @@ def validated_alpha_beta(value):
         raise ValueError("α/β must be a nonzero finite number.") from exc
     if not math.isfinite(ab) or ab == 0:
         raise ValueError("α/β must be a nonzero finite number.")
-    return ab
+    return abs(ab)
 
 
 class PrescriptionsSelection:
@@ -345,19 +357,21 @@ def validate_schedules(schedules):
 
 
 def rd_parameters(ab, qgrid):
-    """Fixed-ratio RD branches. At q=0, r=0 and finite s is undetermined."""
+    """Fixed-magnitude RD branches, with the sign selected by q."""
     ab = validated_alpha_beta(ab)
     qgrid = np.asarray(qgrid, dtype=float)
     if qgrid.size == 0 or np.any(~np.isfinite(qgrid)):
         raise ValueError("All candidate q values must be finite.")
-    if np.any((qgrid != 0) & (np.sign(qgrid) != np.sign(ab))):
-        raise ValueError("Nonzero q must have the same sign as the fixed α/β to retain s > 0.")
     s = np.full(qgrid.shape, np.nan)
     active = qgrid != 0
     magnitude = np.abs(qgrid[active])
     sqrt_q = np.sqrt(magnitude)
     root = np.hypot(sqrt_q, np.sqrt(2.0) * np.sqrt(abs(ab)))
-    s[active] = (2.0 / (sqrt_q + root)) / sqrt_q if ab > 0 else ((sqrt_q + root) / abs(ab)) / sqrt_q
+    positive = qgrid[active] > 0
+    rates = np.empty_like(magnitude)
+    rates[positive] = (2.0 / (sqrt_q[positive] + root[positive])) / sqrt_q[positive]
+    rates[~positive] = ((sqrt_q[~positive] + root[~positive]) / ab) / sqrt_q[~positive]
+    s[active] = rates
     reserve = np.zeros(qgrid.shape)
     reserve[active] = qgrid[active] * s[active]
     return reserve, s
@@ -367,11 +381,10 @@ def _fraction_bed_values(ab, qgrid, s, doses):
     """Compute paired or broadcast fraction effects from a valid RD branch."""
     qgrid, s, doses = np.broadcast_arrays(qgrid, s, doses)
     bed = np.array(doses, dtype=float, copy=True)
-    active = qgrid != 0
-    d = doses[active]
-    rates = s[active]
-    t = rates * d
-    if ab > 0:
+    positive, negative = qgrid > 0, qgrid < 0
+    if np.any(positive):
+        d = doses[positive]
+        t = s[positive] * d
         # 2(t - 1 + exp(-t))/t² tends to 1 without cancellation.
         phi = np.empty_like(t)
         small = t < 1e-2
@@ -379,9 +392,11 @@ def _fraction_bed_values(ab, qgrid, s, doses):
         phi[small] = 1 + x * (-1 / 3 + x * (1 / 12 + x * (-1 / 60 + x / 360)))
         x = t[~small]
         phi[~small] = (2 / x) * (1 + np.expm1(-x) / x)
-        bed[active] = d * (1 + d / ab * phi)
-    else:
-        magnitude = -qgrid[active]
+        bed[positive] = d * (1 + d / ab * phi)
+    if np.any(negative):
+        d, rates = doses[negative], s[negative]
+        t = rates * d
+        magnitude = -qgrid[negative]
         weight = np.empty_like(magnitude)
         inverse = np.empty_like(magnitude)
         large = magnitude > 1
@@ -390,7 +405,7 @@ def _fraction_bed_values(ab, qgrid, s, doses):
         denominator = 1 + magnitude[~large] * rates[~large]
         weight[~large] = magnitude[~large] / denominator
         inverse[~large] = 1 / denominator
-        bed[active] = d * inverse + weight * (-np.expm1(-t))
+        bed[negative] = d * inverse + weight * (-np.expm1(-t))
     return bed
 
 
@@ -408,8 +423,7 @@ def evaluate(ab, qgrid, schedules):
     qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
     d = np.array([total / n for _, total, n in schedules], dtype=float)
     n = np.array([n for _, total, n in schedules], dtype=float)
-    bed = fraction_bed(ab, qgrid, np.concatenate(([2.0], d)))
-    return 2 * n[None, :] * bed[:, 1:] / bed[:, :1]
+    return EQD2_FN(ab, qgrid[:, None], d[None, :], n[None, :])
 
 
 def grid_values(start, stop, step):
@@ -429,6 +443,7 @@ def grid_values(start, stop, step):
         a[np.abs(a) <= rounding] = 0.0
     endpoints = [start, stop, 0.0] if start <= 0 <= stop else [start, stop]
     a = np.unique(np.concatenate((a[(a >= start) & (a <= stop)], endpoints)))
+    a[a == 0] = 0.0
     if len(a) > 200001:
         raise ValueError("Over 200,000 grid points; increase step.")
     return a
@@ -735,15 +750,6 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
     schedules = validate_schedules(schedules)
     ab = validated_alpha_beta(ab)
     q = grid_values(start, stop, step)
-    # A shared signed interval can optimize sets of either sign independently.
-    q = q[(q >= 0) if ab > 0 else (q <= 0)]
-    if float(start) <= 0 <= float(stop):
-        q = np.unique(np.append(q, 0.0))
-    if not len(q):
-        raise ValueError(
-            "The search interval has no q values compatible with the fixed α/β. "
-            "Use q >= 0 for positive α/β or q <= 0 for negative α/β."
-        )
     z = evaluate(ab, q, schedules)
     statistics = _profile_statistics(z)
     objective_key = {"range": "spread", "sd": "sample_sd", "sse": "sse"}[method]
@@ -803,6 +809,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
         slope=slope,
         idx=idx,
         ab=float(ab),
+        signed_ab=float(ab) if dq >= 0 else -float(ab),
         method=method,
         schedules=schedules,
         **statistics,
@@ -848,13 +855,13 @@ def export(result, folder):
             w.writerow(
                 ["Dq_Gy", "mean_EQD2_Gy", "population_SD_Gy", "range_Gy"]
                 + [f"EQD2_{name}_Gy" for name in names]
-                + ["sample_SD_Gy", "SSE_Gy2"]
+                + ["sample_SD_Gy", "SSE_Gy2", "alpha_beta_Gy"]
             )
             for j, q in enumerate(r["q"]):
                 w.writerow(
                     [q, r["mean"][j], r["sd"][j], r["spread"][j]]
                     + list(r["eqd2"][j])
-                    + [r["sample_sd"][j], r["sse"][j]]
+                    + [r["sample_sd"][j], r["sse"][j], r["ab"] if q >= 0 else -r["ab"]]
                 )
         else:
             header = ["Dq_Gy"]
@@ -875,9 +882,7 @@ def export(result, folder):
             aligned = []
             for dataset in datasets:
                 r = dataset["result"]
-                compatible = (common_q >= 0) if r["ab"] > 0 else (common_q <= 0)
-                eqd2 = np.full((len(common_q), len(r["schedules"])), np.nan)
-                eqd2[compatible] = evaluate(r["ab"], common_q[compatible], r["schedules"])
+                eqd2 = evaluate(r["ab"], common_q, r["schedules"])
                 means = eqd2.mean(axis=1)
                 aligned.append(
                     (
@@ -894,7 +899,6 @@ def export(result, folder):
                 for eqd2, means, sd, sample_sd, sse, spread in aligned:
                     values += [means[i], sd[i], sample_sd[i], sse[i], spread[i]]
                     values += list(eqd2[i])
-                # Blank cells denote the other sign's inadmissible branch.
                 w.writerow([value if np.isfinite(value) else None for value in values])
     with (folder / "optimal_schedules.csv").open("w", newline="", encoding="utf-8-sig") as fp:
         w = csv.writer(fp)
@@ -922,7 +926,7 @@ def export(result, folder):
             for (name, total, n), value in zip(r["schedules"], r["eqd2"][i]):
                 values = [name, total, n, total / n, value]
                 if multi and len(datasets) > 1:
-                    values = [dataset["name"], r["ab"], r["method"], r["q"][i]] + values
+                    values = [dataset["name"], r["signed_ab"], r["method"], r["q"][i]] + values
                 w.writerow(values)
     # Export the optimization profile at 160 ppi.
     export_image(result, folder / "range.png", ppi=160)
@@ -1118,7 +1122,7 @@ def read_prescriptions_set_csv(path):
                         raise ValueError(
                             f"CSV line {line}: alpha_beta must be a nonzero finite number."
                         )
-                    alpha_betas.append(ab)
+                    alpha_betas.append(abs(ab))
     except (csv.Error, UnicodeError) as exc:
         raise ValueError(f"Cannot read CSV. Use UTF-8 text with a header row: {exc}") from exc
     schedules = validate_schedules(schedules)
@@ -1182,7 +1186,7 @@ def draw_range_plot(ax, result):
             values = r[metric]
             i = r["idx"]
             name = dataset["name"]
-            label = f"{name} (α/β={r['ab']:g} Gy)" if name else OPTIMIZATION_METHODS[method]
+            label = f"{name} (|α/β|={r['ab']:g} Gy)" if name else OPTIMIZATION_METHODS[method]
             # Explicit colours prevent the second curve from reusing the first
             # cycle colour when a custom first-curve colour is supplied.
             color_arg = {"color": palette[pos % len(palette)]}
@@ -1434,6 +1438,8 @@ def build_analysis(dataset):
     r = dataset["result"]
     i, ab = r["idx"], r["ab"]
     dq = float(r["q"][i])
+    magnitude = abs(ab)
+    ab = magnitude if dq >= 0 else -magnitude
     reserves, rates = rd_parameters(ab, np.array([dq]))
     reserve = float(reserves[0])
     s = float(rates[0]) if dq != 0 else None
@@ -1468,6 +1474,7 @@ def build_analysis(dataset):
     return {
         "name": dataset.get("name") or "Prescriptions set",
         "alpha_beta": ab,
+        "alpha_beta_magnitude": magnitude,
         "D_q": dq,
         "s": s,
         "r": reserve,
@@ -1490,6 +1497,7 @@ def analysis_summary(a):
         ("Prescriptions set", a["name"]),
         ("Prescriptions (N)", rd["N"]),
         ("α/β (Gy)", a["alpha_beta"]),
+        ("|α/β| (Gy)", a["alpha_beta_magnitude"]),
         ("Dq (Gy)", a["D_q"]),
         ("s (Gy⁻¹)", a["s"]),
         ("r", a["r"]),
@@ -1567,18 +1575,17 @@ def run_robustness(a, alpha_beta_values=None):
             )
     sensitivity = []
     for ab in alpha_beta_values or [
-        a["alpha_beta"] * 2 / 3,
-        a["alpha_beta"],
-        a["alpha_beta"] * 4 / 3,
+        a["alpha_beta_magnitude"] * 2 / 3,
+        a["alpha_beta_magnitude"],
+        a["alpha_beta_magnitude"] * 4 / 3,
     ]:
         ab = validated_alpha_beta(ab)
-        if np.sign(ab) != np.sign(a["alpha_beta"]):
-            raise ValueError("Sensitivity α/β values must retain the fitted branch's sign.")
         fitted = analyze(ab, start, stop, step, rows, method=a["method"], bound_pct=a["bound_pct"])
         detail = build_analysis({"name": a["name"], "result": fitted})
         sensitivity.append(
             {
                 "alpha_beta_Gy": ab,
+                "fitted_alpha_beta_Gy": detail["alpha_beta"],
                 "D_q_Gy": detail["D_q"],
                 "mean_EQD2_Gy": detail["models"]["RD"]["mean"],
                 "SD_Gy": detail["models"]["RD"]["SD"],
@@ -2123,7 +2130,7 @@ def open_analysis_window(parent, result):
     )
     robust_controls = ttk.Frame(robust_page)
     robust_controls.pack(fill="x", pady=(0, 8))
-    ttk.Label(robust_controls, text="Sensitivity α/β values (Gy, comma separated)").pack(
+    ttk.Label(robust_controls, text="Sensitivity |α/β| values (Gy, comma separated)").pack(
         side="left"
     )
     ab_values = tk.StringVar()
@@ -2351,7 +2358,11 @@ def open_analysis_window(parent, result):
         ab_values.set(
             ", ".join(
                 f"{v:g}"
-                for v in [a["alpha_beta"] * 2 / 3, a["alpha_beta"], a["alpha_beta"] * 4 / 3]
+                for v in [
+                    a["alpha_beta_magnitude"] * 2 / 3,
+                    a["alpha_beta_magnitude"],
+                    a["alpha_beta_magnitude"] * 4 / 3,
+                ]
             )
         )
         populate(ptable, a["prescriptions"])
@@ -2419,7 +2430,7 @@ def launch_gui(db_path=None):
     ).grid(row=2, column=0, columnspan=5, sticky="w", padx=7, pady=(6, 0))
     ttk.Label(
         controls,
-        text="α/β stays fixed: positive values use q ≥ 0; negative values use q ≤ 0. At q = 0, EQD2 = D.",
+        text="|α/β| stays fixed. The sign is positive for q ≥ 0 and negative for q < 0. At q = 0, EQD2 = D.",
         foreground="#555555",
     ).grid(row=3, column=0, columnspan=5, sticky="w", padx=7, pady=(3, 0))
 
@@ -2494,7 +2505,7 @@ def launch_gui(db_path=None):
 
     ab_bar = ttk.Frame(prescription_list)
     ab_bar.pack(fill="x", pady=(0, 5))
-    ttk.Label(ab_bar, text="α/β (Gy)").pack(side="left", padx=(0, 6))
+    ttk.Label(ab_bar, text="|α/β| (Gy)").pack(side="left", padx=(0, 6))
     main_ab = tk.StringVar()
     main_ab_entry = ttk.Entry(ab_bar, textvariable=main_ab, width=12)
     main_ab_entry.pack(side="left")
@@ -2578,7 +2589,7 @@ def launch_gui(db_path=None):
     for key, label, width in [
         ("prescriptions_set", "Prescriptions set", 250),
         ("N", "Prescriptions", 90),
-        ("ab", "α/β (Gy)", 90),
+        ("ab", "|α/β| (Gy)", 90),
         ("dq", "Dq (Gy)", 100),
         ("criterion", "Minimized objective", 155),
         ("mean", "Mean EQD2 (Gy)", 125),
@@ -2855,7 +2866,7 @@ def launch_gui(db_path=None):
         count = len(selections.selected_rows(full))
         ab = selections.alpha_beta_text[key].strip() or "—"
         set_labels[key].set(
-            f"{full['name']}\nα/β = {ab} Gy · {count}/{len(full['prescriptions'])} selected"
+            f"{full['name']}\n|α/β| = {ab} Gy · {count}/{len(full['prescriptions'])} selected"
         )
 
     def refresh_prescriptions():
@@ -2918,7 +2929,7 @@ def launch_gui(db_path=None):
             return
         refresh_sets(prefer_id=int(key))
         status.set(
-            f"Saved α/β = {ab:g} Gy for {dataset_cache[key]['name']}. Run optimization to update results."
+            f"Saved |α/β| = {ab:g} Gy for {dataset_cache[key]['name']}. Run optimization to update results."
         )
 
     def select_prescriptions(value):
@@ -2980,7 +2991,7 @@ def launch_gui(db_path=None):
             messagebox.showerror("Cannot export prescriptions set", str(exc), parent=root)
             return
         status.set(
-            f"Exported {len(record['prescriptions'])} prescriptions from {record['name']} with α/β = {record['alpha_beta']:g} Gy."
+            f"Exported {len(record['prescriptions'])} prescriptions from {record['name']} with |α/β| = {record['alpha_beta']:g} Gy."
         )
 
     def set_enabled_changed(key):
@@ -3112,7 +3123,7 @@ def launch_gui(db_path=None):
         )
         top.pack(fill="x")
         ttk.Label(top, text="Prescriptions set name").grid(row=0, column=0, sticky="w", padx=5)
-        ttk.Label(top, text="α/β (Gy)").grid(row=0, column=1, sticky="w", padx=5)
+        ttk.Label(top, text="|α/β| (Gy)").grid(row=0, column=1, sticky="w", padx=5)
         draft = record or imported or {}
         set_name = tk.StringVar(value=draft.get("name", ""))
         alpha_beta = tk.StringVar(
@@ -3497,7 +3508,7 @@ def main():
         "--ab",
         type=float,
         default=None,
-        help="fixed finite nonzero alpha/beta override (Gy); stored set value used with --set",
+        help="fixed nonzero alpha/beta magnitude (Gy); its sign follows q",
     )
     parser.add_argument("--dq-start", type=float, default=DEFAULT_Q_START)
     parser.add_argument("--dq-end", type=float, default=DEFAULT_Q_END)
@@ -3574,7 +3585,7 @@ def main():
     print("Symbolic formula:", EQD2_EXPR)
     print("Optimization method:", OPTIMIZATION_METHODS[a.method])
     print(
-        f"alpha/beta={ab:g} Gy; Dq={result['q'][i]:.6f} Gy; SSE={result['sse'][i]:.4f} Gy^2; range={result['spread'][i]:.4f} Gy; sample SD={result['sample_sd'][i]:.4f} Gy; mean={result['mean'][i]:.4f} Gy"
+        f"|alpha/beta|={result['ab']:g} Gy; fitted alpha/beta={result['signed_ab']:g} Gy; Dq={result['q'][i]:.6f} Gy; SSE={result['sse'][i]:.4f} Gy^2; range={result['spread'][i]:.4f} Gy; sample SD={result['sample_sd'][i]:.4f} Gy; mean={result['mean'][i]:.4f} Gy"
     )
     print(
         f"{result['bound_pct']:g}% {'range' if a.method == 'range' else 'SD'} profile bounds:",

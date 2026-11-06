@@ -49,14 +49,16 @@ def check_math_and_plot_interval(app, folder):
     for ab, start, stop in cases:
         fitted = app.analyze(ab, start, stop, 0.9, schedules)
         assert fitted["search_start"] == start and fitted["search_end"] == stop
-        assert fitted["q"][-1 if ab > 0 else 0] == (stop if ab > 0 else start)
+        assert fitted["q"][0] == start and fitted["q"][-1] == stop
+        assert np.count_nonzero(fitted["q"] == 0) == 1
         fitted["plot_settings"] = {"x_min": 0, "x_max": 1}
         fig = Figure(figsize=(8, 5))
         ax = fig.add_subplot(111)
         app.draw_range_plot(ax, fitted)
         np.testing.assert_array_equal(ax.get_xlim(), [start, stop])
         curve = ax.lines[0]
-        assert np.all(curve.get_xdata() >= 0) if ab > 0 else np.all(curve.get_xdata() <= 0)
+        assert curve.get_xdata().min() < 0 < curve.get_xdata().max()
+        assert np.all(np.isfinite(curve.get_ydata()))
         app.export_image(fitted, folder / f"signed-profile-{ab}.png", ppi=100)
 
     # The profile interval belongs to the connected region around the selected minimum.
@@ -119,12 +121,9 @@ def check_signed_model(app, folder):
         app.export_analysis_tables(detail, folder / f"boundary-{ab}", "json")
         app.draw_dispersion_plot(Figure(), detail)
     for ab, q in ((1.5, -1), (-1.5, 1)):
-        try:
-            app.evaluate(ab, [q], schedules)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("An incompatible fixed-ratio branch was accepted")
+        np.testing.assert_array_equal(
+            app.evaluate(ab, [q], schedules), app.evaluate(-ab, [q], schedules)
+        )
     for invalid in (0, float("nan"), float("inf"), -float("inf")):
         try:
             app.validated_alpha_beta(invalid)
@@ -147,14 +146,15 @@ def check_signed_model(app, folder):
     for method in app.OPTIMIZATION_METHODS:
         fitted = app.analyze(ab, -20, 20, 0.02, synthetic, method=method)
         np.testing.assert_allclose(fitted["q"][fitted["idx"]], q, atol=2e-6, rtol=0)
-        assert fitted["ab"] == ab and np.all(fitted["q"] <= 0)
+        assert fitted["ab"] == abs(ab) and fitted["signed_ab"] == ab
+        assert fitted["q"].min() < 0 < fitted["q"].max()
     fitted = app.analyze(ab, -20, 0, 0.02, schedules)
     detail = app.build_analysis({"name": "Inverse shoulder", "result": fitted})
     app.run_robustness(detail)
     app.export_analysis_tables(detail, folder / "negative-analysis", "json")
     app.draw_dispersion_plot(Figure(), detail)
     positive = app.analyze(1.5, -20, 20, 0.02, schedules)
-    assert np.all(positive["q"] >= 0) and positive["q"][0] == 0
+    assert positive["q"][0] == -20 and positive["q"][-1] == 20
     assert app.evaluate(1.5, [1e12], schedules).min() > 0
     mixed = app.analyze_selected(
         [
@@ -197,9 +197,9 @@ def check_signed_model(app, folder):
     assert store.get_set(7)["prescriptions"] == [("Reference", 78, 39), ("Other", 30, 5)]
     store.update_alpha_beta(7, -5)
     reopened = app.PrescriptionStore(path)
-    assert reopened.get_set(7)["alpha_beta"] == -5
+    assert reopened.get_set(7)["alpha_beta"] == 5
     app.export_prescriptions_set(reopened.get_set(7), folder / "signed.csv")
-    assert app.read_prescriptions_set_csv(folder / "signed.csv")["alpha_beta"] == -5
+    assert app.read_prescriptions_set_csv(folder / "signed.csv")["alpha_beta"] == 5
     with reopened._connection() as con:
         assert [row[0] for row in con.execute("SELECT id FROM prescriptions ORDER BY id")] == [
             11,
@@ -209,6 +209,71 @@ def check_signed_model(app, folder):
     reopened.delete_set(7)
     with reopened._connection() as con:
         assert con.execute("SELECT count(*) FROM prescriptions").fetchone()[0] == 0
+
+
+def check_full_signed_profile(app, folder):
+    """Check both branches for one magnitude and the 15-prescription NSCLC set."""
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    doses = [
+        (70, 35),
+        (66, 33),
+        (50, 20),
+        (52.5, 15),
+        (60, 15),
+        (60, 8),
+        (60, 5),
+        (50, 4),
+        (48, 4),
+        (66, 3),
+        (60, 3),
+        (54, 3),
+        (45, 3),
+        (34, 1),
+        (30, 1),
+    ]
+    nsclc = [
+        (f"NSCLC {index + 1}", total, fractions) for index, (total, fractions) in enumerate(doses)
+    ]
+    result = app.analyze(10, -50, 50, 0.05, nsclc)
+    assert result["ab"] == 10 and len(result["schedules"]) == 15
+    assert result["q"][0] == -50 and result["q"][-1] == 50
+    assert np.count_nonzero(result["q"] == 0) == 1
+    assert np.all(np.isfinite(result["eqd2"])) and np.all(result["eqd2"] > 0)
+    np.testing.assert_array_equal(
+        result["eqd2"][result["q"] == 0][0], [total for _, total, _ in nsclc]
+    )
+    reserve, rate = app.rd_parameters(10, [-3, 3])
+    np.testing.assert_allclose(2 * (1 - reserve) / (reserve * rate), [-10, 10], rtol=1e-13)
+    for magnitude in (10, -10):
+        zero = app.analyze(magnitude, 0, 0, 0.1, nsclc)
+        assert zero["signed_ab"] == 10 and zero["q"].tolist() == [0]
+
+    # Around zero EQD2 approaches the same smooth rational curve from both sides.
+    q = np.array([-1e-4, -1e-6, 0, 1e-6, 1e-4])
+    n = np.array([fractions for _, _, fractions in nsclc])
+    d = np.array([total / fractions for _, total, fractions in nsclc])
+    expected = 2 * n * (d - q[:, None]) / (2 - q[:, None])
+    np.testing.assert_allclose(app.evaluate(10, q, nsclc), expected, rtol=1e-13)
+    h = 1e-5
+    around = app.evaluate(10, [-h, 0, h], nsclc)
+    derivative = (around[2] - around[0]) / (2 * h)
+    np.testing.assert_allclose(derivative, n * (d - 2) / 2, rtol=2e-8, atol=1e-8)
+
+    fig = Figure()
+    ax = fig.add_subplot(111)
+    app.draw_range_plot(ax, result)
+    assert ax.get_xlim() == (-50, 50)
+    assert ax.lines[0].get_xdata().min() == -50
+    assert ax.lines[0].get_xdata().max() == 50
+    app.export(result, folder / "nsclc-full-profile")
+    with (folder / "nsclc-full-profile" / "grid_results.csv").open(encoding="utf-8-sig") as stream:
+        rows = list(csv.DictReader(stream))
+    for row in rows:
+        q_value = float(row["Dq_Gy"])
+        assert float(row["alpha_beta_Gy"]) == (10 if q_value >= 0 else -10)
+    assert sum(float(row["Dq_Gy"]) == 0 for row in rows) == 1
 
 
 def check_gui(app, db_path, result):
@@ -293,11 +358,11 @@ def check_gui(app, db_path, result):
                 root.setvar(ab_entry.cget("textvariable"), "-2")
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
-                assert float(row[2]) == -2 and float(row[3]) <= 0
+                assert float(row[2]) == 2
                 button("Save α/β").invoke()
                 assert (
                     app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)["alpha_beta"]
-                    == -2
+                    == 2
                 )
                 optimize.invoke()
                 button("Analysis…").invoke()
@@ -382,6 +447,8 @@ def run_checks(report_path, include_gui=True):
             passed(
                 "High-precision RD arithmetic, connected profile bounds, and requested graph intervals"
             )
+            check_full_signed_profile(app, folder)
+            passed("Full 15-prescription NSCLC profile, q-dependent signs, and smooth unique zero")
 
             store = app.PrescriptionStore(folder / "prescriptions.sqlite3", app.DEFAULT_SETS)
             assert len(store.list_sets()) == 1, "Only prostate may be seeded by default"
