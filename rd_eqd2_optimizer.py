@@ -46,15 +46,19 @@ _EQD2_SYMBOLIC_FN = sp.lambdify((AB, Q, D, N), EQD2_EXPR, modules="numpy")
 
 
 def EQD2_FN(ab, q, d, n):
-    """Evaluate the symbolic expression without evaluating its singular zero branch."""
+    """Evaluate the RD expression with stable arithmetic and the zero-q limit."""
     ab, q, d, n = np.broadcast_arrays(*[np.asarray(x, dtype=float) for x in (ab, q, d, n)])
     if np.any(~np.isfinite(ab)) or np.any(ab == 0):
         raise ValueError("α/β must be a nonzero finite number.")
     if np.any(~np.isfinite(q)) or np.any((q != 0) & (np.sign(q) != np.sign(ab))):
         raise ValueError("Nonzero q must be finite and have the same sign as the fixed α/β.")
-    result = np.asarray(n * d).copy()
-    active = q != 0
-    result[active] = _EQD2_SYMBOLIC_FN(ab[active], q[active], d[active], n[active])
+    result = np.empty(ab.shape)
+    for ratio in np.unique(ab):
+        selected = ab == ratio
+        _, rates = rd_parameters(float(ratio), q[selected])
+        per_fraction = _fraction_bed_values(float(ratio), q[selected], rates, d[selected])
+        reference = _fraction_bed_values(float(ratio), q[selected], rates, 2.0)
+        result[selected] = 2 * n[selected] * per_fraction / reference
     return result.item() if result.ndim == 0 else result
 
 
@@ -359,28 +363,44 @@ def rd_parameters(ab, qgrid):
     return reserve, s
 
 
-def fraction_bed(ab, qgrid, doses):
-    """Stable BED per fraction, including the continuous q=0 boundary."""
-    ab = validated_alpha_beta(ab)
-    qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
-    reserve, s = rd_parameters(ab, qgrid)
-    doses = np.atleast_1d(np.asarray(doses, dtype=float))
-    bed = np.broadcast_to(doses, (len(qgrid), len(doses))).copy()
+def _fraction_bed_values(ab, qgrid, s, doses):
+    """Compute paired or broadcast fraction effects from a valid RD branch."""
+    qgrid, s, doses = np.broadcast_arrays(qgrid, s, doses)
+    bed = np.array(doses, dtype=float, copy=True)
     active = qgrid != 0
-    t = s[active, None] * doses[None, :]
+    d = doses[active]
+    rates = s[active]
+    t = rates * d
     if ab > 0:
         # 2(t - 1 + exp(-t))/t² tends to 1 without cancellation.
         phi = np.empty_like(t)
-        small = t < 1e-3
+        small = t < 1e-2
         x = t[small]
         phi[small] = 1 + x * (-1 / 3 + x * (1 / 12 + x * (-1 / 60 + x / 360)))
         x = t[~small]
         phi[~small] = (2 / x) * (1 + np.expm1(-x) / x)
-        bed[active] = doses * (1 + doses / ab * phi)
+        bed[active] = d * (1 + d / ab * phi)
     else:
-        denominator = 1 - reserve[active, None]
-        bed[active] = doses / denominator + (-qgrid[active, None] / denominator) * (-np.expm1(-t))
+        magnitude = -qgrid[active]
+        weight = np.empty_like(magnitude)
+        inverse = np.empty_like(magnitude)
+        large = magnitude > 1
+        weight[large] = 1 / (rates[large] + 1 / magnitude[large])
+        inverse[large] = weight[large] / magnitude[large]
+        denominator = 1 + magnitude[~large] * rates[~large]
+        weight[~large] = magnitude[~large] / denominator
+        inverse[~large] = 1 / denominator
+        bed[active] = d * inverse + weight * (-np.expm1(-t))
     return bed
+
+
+def fraction_bed(ab, qgrid, doses):
+    """Stable BED per fraction, including the continuous q=0 boundary."""
+    ab = validated_alpha_beta(ab)
+    qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
+    _, s = rd_parameters(ab, qgrid)
+    doses = np.atleast_1d(np.asarray(doses, dtype=float))
+    return _fraction_bed_values(ab, qgrid[:, None], s[:, None], doses[None, :])
 
 
 def evaluate(ab, qgrid, schedules):
@@ -398,11 +418,19 @@ def grid_values(start, stop, step):
     step = float(step)
     if not all(np.isfinite(x) for x in (start, stop, step)) or step <= 0 or stop < start:
         raise ValueError("Use finite q start <= q end and a positive step.")
-    count = math.floor((stop - start) / step + 1e-9) + 1
-    if count > 200001:
+    intervals = (stop - start) / step
+    if not math.isfinite(intervals) or intervals > 200000:
         raise ValueError("Over 200,000 grid points; increase step.")
+    count = math.floor(intervals) + 1
     a = start + step * np.arange(count)
-    a = a[a <= stop + step * 1e-8]
+    rounding = 8 * np.finfo(float).eps * max(abs(start), abs(stop), abs(step))
+    a[np.abs(a - stop) <= rounding] = stop
+    if start <= 0 <= stop:
+        a[np.abs(a) <= rounding] = 0.0
+    endpoints = [start, stop, 0.0] if start <= 0 <= stop else [start, stop]
+    a = np.unique(np.concatenate((a[(a >= start) & (a <= stop)], endpoints)))
+    if len(a) > 200001:
+        raise ValueError("Over 200,000 grid points; increase step.")
     return a
 
 
@@ -451,8 +479,6 @@ DEFAULT_PLOT_SETTINGS = {
     "legend_location": "upper left",
     "curve_color": "#1f77b4",
     "bounds_color": "",
-    "x_min": "",
-    "x_max": "",
     "y_min": "",
     "y_max": "",
 }
@@ -540,7 +566,7 @@ def normalized_plot_settings(values=None):
                 raise ValueError(
                     f"{key.replace('_', ' ').capitalize()} must be a valid Matplotlib color (e.g., #1f77b4)."
                 ) from exc
-    for key in ("x_min", "x_max", "y_min", "y_max"):
+    for key in ("y_min", "y_max"):
         if cfg[key] is None or str(cfg[key]).strip() == "":
             cfg[key] = ""
             continue
@@ -553,7 +579,7 @@ def normalized_plot_settings(values=None):
         if not math.isfinite(value):
             raise ValueError(f"{key.replace('_', ' ').capitalize()} must be finite.")
         cfg[key] = value
-    for axis in ("x", "y"):
+    for axis in ("y",):
         if (
             cfg[f"{axis}_min"] != ""
             and cfg[f"{axis}_max"] != ""
@@ -612,13 +638,20 @@ def _bounded_minimum(objective, left, right, iterations=90):
 
 
 def _profile_bounds(
-    ab, optimum, schedules, minimum_value, fraction=0.05, criterion="sd", lower=1e-4, upper=1e3
+    ab,
+    optimum,
+    schedules,
+    minimum_value,
+    fraction=0.05,
+    criterion="sd",
+    lower=1e-4,
+    upper=1e3,
+    profile=None,
 ):
     """Find the profile's tolerance crossings on signed intervals, including zero.
 
-    SSE uses SD-profile bounds to retain the paper's established 5% SD
-    definition. Range minimization uses a range-profile tolerance instead.
-    None indicates no crossing before the supplied search boundary.
+    SSE and SD use sample-SD bounds; range uses range-profile bounds.
+    None indicates no crossing before the search boundary.
     """
     if criterion not in ("sd", "range"):
         raise ValueError("Unknown profile criterion.")
@@ -648,8 +681,24 @@ def _profile_bounds(
                 break
         return lo + (hi - lo) / 2
 
-    left = solve(lower, optimum) if optimum > lower else None
-    right = solve(optimum, upper) if optimum < upper else None
+    if profile is None:
+        left = solve(lower, optimum) if optimum > lower else None
+        right = solve(optimum, upper) if optimum < upper else None
+        return left, right
+
+    points, measures = profile
+
+    def connected_crossing(indices):
+        previous = optimum
+        for index in indices:
+            point = float(points[index])
+            if measures[index] > target:
+                return solve(min(point, previous), max(point, previous))
+            previous = point
+        return None
+
+    left = connected_crossing(np.flatnonzero(points < optimum)[::-1])
+    right = connected_crossing(np.flatnonzero(points > optimum))
     return left, right
 
 
@@ -728,6 +777,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
         criterion=profile_measure,
         lower=float(q[0]),
         upper=float(q[-1]),
+        profile=(q, statistics["spread"] if method == "range" else sample_sd),
     )
     fraction_doses = np.array([total / fx for _, total, fx in schedules])
     centered_doses = fraction_doses - fraction_doses.mean()
@@ -746,6 +796,8 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
         profile_measure=profile_measure,
         bound_pct=bound_pct,
         search_step=float(step),
+        search_start=float(start),
+        search_end=float(stop),
         rsd=rsd,
         eta=eta,
         slope=slope,
@@ -1216,6 +1268,16 @@ def draw_range_plot(ax, result):
                     color=color,
                     zorder=5,
                 )
+                left_edge = float(r.get("search_start", r["q"][0]))
+                right_edge = float(r.get("search_end", r["q"][-1]))
+                span = right_edge - left_edge
+                alignment = (
+                    "left"
+                    if dq <= left_edge + 0.15 * span
+                    else "right"
+                    if dq >= right_edge - 0.15 * span
+                    else "center"
+                )
                 ax.annotate(
                     r"$D_q$" + f" = {dq:.4f} Gy",
                     xy=(dq, 0),
@@ -1224,7 +1286,7 @@ def draw_range_plot(ax, result):
                     textcoords="offset points",
                     fontsize=settings["dq_font"],
                     fontfamily=settings["font_family"],
-                    ha="center",
+                    ha=alignment,
                     va="top",
                     color=color,
                     clip_on=False,
@@ -1266,22 +1328,21 @@ def draw_range_plot(ax, result):
                 fontsize=settings["legend_font"],
                 prop={"family": settings["font_family"], "size": settings["legend_font"]},
             )
-        for axis in ("x", "y"):
-            low, high = settings[f"{axis}_min"], settings[f"{axis}_max"]
-            if low != "" or high != "":
-                getter = ax.get_xlim if axis == "x" else ax.get_ylim
-                setter = ax.set_xlim if axis == "x" else ax.set_ylim
-                current = getter()
-                if axis == "x":
-                    setter(
-                        left=low if low != "" else current[0],
-                        right=high if high != "" else current[1],
-                    )
-                else:
-                    setter(
-                        bottom=low if low != "" else current[0],
-                        top=high if high != "" else current[1],
-                    )
+        start = min(
+            float(ds["result"].get("search_start", ds["result"]["q"][0])) for ds in datasets
+        )
+        stop = max(float(ds["result"].get("search_end", ds["result"]["q"][-1])) for ds in datasets)
+        if start == stop:
+            padding = max(1.0, abs(start)) * 0.05
+            ax.set_xlim(start - padding, stop + padding)
+        else:
+            ax.set_xlim(start, stop)
+        low, high = settings["y_min"], settings["y_max"]
+        if low != "" or high != "":
+            current = ax.get_ylim()
+            ax.set_ylim(
+                bottom=low if low != "" else current[0], top=high if high != "" else current[1]
+            )
         ax.xaxis.labelpad = (
             (26 + 16 * max(0, len(datasets) - 1)) if settings["show_minimum"] else 10
         )
@@ -1471,8 +1532,9 @@ def analysis_summary(a):
 
 def run_robustness(a, alpha_beta_values=None):
     r = a["source_result"]
-    start, stop = float(r["q"][0]), float(r["q"][-1])
-    step = float(r.get("search_step", np.median(np.diff(r["q"]))))
+    start = float(r.get("search_start", r["q"][0]))
+    stop = float(r.get("search_end", r["q"][-1]))
+    step = float(r["search_step"]) if "search_step" in r else float(np.median(np.diff(r["q"])))
     rows = r["schedules"]
     held_out = []
     if len(rows) >= 3:
@@ -2547,6 +2609,12 @@ def launch_gui(db_path=None):
 
     def draw_blank_plot():
         ax.clear()
+        try:
+            start, stop = float(var_start.get()), float(var_end.get())
+            if math.isfinite(start) and math.isfinite(stop) and start < stop:
+                ax.set_xlim(start, stop)
+        except ValueError:
+            pass
         placeholder = {"method": method_key(), "plot_settings": plot_settings}
         ax.set_xlabel(
             plot_settings["x_label"] or "Candidate parameter ($q$) [Gy]",
@@ -2649,8 +2717,6 @@ def launch_gui(db_path=None):
         ttk.Label(titles, text="Axis limits (leave blank for automatic scaling)").grid(
             row=5, column=0, columnspan=4, sticky="w", pady=(0, 6)
         )
-        numeric_field(titles, "x_min", "X minimum", 6)
-        numeric_field(titles, "x_max", "X maximum", 6, 1)
         numeric_field(titles, "y_min", "Y minimum", 7)
         numeric_field(titles, "y_max", "Y maximum", 7, 1)
         titles.columnconfigure(1, weight=1)

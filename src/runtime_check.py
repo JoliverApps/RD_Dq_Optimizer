@@ -6,6 +6,77 @@ import tempfile
 from pathlib import Path
 
 
+def check_math_and_plot_interval(app, folder):
+    """Check RD values independently and verify the requested plotting interval."""
+    from unittest.mock import patch
+
+    import mpmath as mp
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    with mp.workdps(80):
+        for sign in (1, -1):
+            for magnitude in (1e-6, 1.5, 10, 1e6):
+                ab = sign * magnitude
+                for q_magnitude in (1e-14, 1e-6, 0.01, 1, 1e6, 1e14, 1e20):
+                    q = sign * q_magnitude
+                    a_mp, q_mp = mp.mpf(ab), mp.mpf(q)
+                    root = mp.sqrt(1 + 2 * a_mp / q_mp)
+                    rate = (root - 1) / a_mp if ab > 0 else (-1 - root) / a_mp
+                    reserve = q_mp * rate
+                    doses = (0.01, 1.8, 2.0, 9.5, 100)
+                    expected_bed = [
+                        float((mp.mpf(d) + q_mp * mp.expm1(-rate * d)) / (1 - reserve))
+                        for d in doses
+                    ]
+                    bed = app.fraction_bed(ab, [q], doses)[0]
+                    np.testing.assert_allclose(bed, expected_bed, rtol=1e-12)
+                    expected_eqd2 = 40 * np.array(expected_bed) / expected_bed[2]
+                    np.testing.assert_allclose(
+                        app.EQD2_FN(ab, q, doses, 20), expected_eqd2, rtol=1e-12
+                    )
+        for ratio, candidate in ((1.5, 3.5), (-5, -3)):
+            np.testing.assert_allclose(
+                app.EQD2_FN(ratio, candidate, np.array([1.8, 2, 6]), 20),
+                app._EQD2_SYMBOLIC_FN(ratio, candidate, np.array([1.8, 2, 6]), 20),
+                rtol=1e-13,
+            )
+
+    schedules = [("Reference", 60, 30), ("Other", 48, 4)]
+    grid = app.grid_values(-3.2, 4.9, 0.7)
+    assert grid[0] == -3.2 and grid[-1] == 4.9 and 0 in grid
+    cases = [(10, -20.3, 13.7), (-10, -14.3, 6.2)]
+    for ab, start, stop in cases:
+        fitted = app.analyze(ab, start, stop, 0.9, schedules)
+        assert fitted["search_start"] == start and fitted["search_end"] == stop
+        assert fitted["q"][-1 if ab > 0 else 0] == (stop if ab > 0 else start)
+        fitted["plot_settings"] = {"x_min": 0, "x_max": 1}
+        fig = Figure(figsize=(8, 5))
+        ax = fig.add_subplot(111)
+        app.draw_range_plot(ax, fitted)
+        np.testing.assert_array_equal(ax.get_xlim(), [start, stop])
+        curve = ax.lines[0]
+        assert np.all(curve.get_xdata() >= 0) if ab > 0 else np.all(curve.get_xdata() <= 0)
+        app.export_image(fitted, folder / f"signed-profile-{ab}.png", ppi=100)
+
+    # The profile interval belongs to the connected region around the selected minimum.
+    points = np.linspace(-9, -1, 161)
+    measures = 1 + np.sin(np.pi * (points + 5) / 4) ** 2
+
+    def profile_values(_ab, q, _schedules):
+        sd = 1 + np.sin(np.pi * (np.asarray(q) + 5) / 4) ** 2
+        return np.column_stack((70 - sd / np.sqrt(2), 70 + sd / np.sqrt(2)))
+
+    with patch.object(app, "evaluate", profile_values):
+        bounds = app._profile_bounds(
+            -10, -5, schedules, 1.0, lower=-9, upper=-1, profile=(points, measures)
+        )
+    radius = 4 * np.arcsin(np.sqrt(0.05)) / np.pi
+    np.testing.assert_allclose(bounds, [-5 - radius, -5 + radius], atol=1e-11)
+    flat = app.analyze(-10, -9, -1, 0.1, [("A", 60, 30), ("B", 60, 30)])
+    assert flat["profile_bounds"] == (None, None)
+
+
 def check_signed_model(app, folder):
     """Check the signed extension against independently integrated hazards."""
     import sqlite3
@@ -306,6 +377,10 @@ def run_checks(report_path, include_gui=True):
             check_signed_model(app, folder)
             passed(
                 "Signed fixed-ratio branches, zero limit, independent hazard integration, migration and exports"
+            )
+            check_math_and_plot_interval(app, folder)
+            passed(
+                "High-precision RD arithmetic, connected profile bounds, and requested graph intervals"
             )
 
             store = app.PrescriptionStore(folder / "prescriptions.sqlite3", app.DEFAULT_SETS)
