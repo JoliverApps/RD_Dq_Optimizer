@@ -1,0 +1,55 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" ToolsVersion="4.0">
+  <ItemGroup>
+    <Filter Include="Source">
+      <UniqueIdentifier>{B563B38F-DA36-46A8-A127-A14A8BD11CE4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Build">
+      <UniqueIdentifier>{9B32456B-85AF-4EAD-84FA-9D5A1C34B991}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Documentation">
+      <UniqueIdentifier>{B93A5C96-A581-49F4-8F1E-B3ECC4196E70}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Samples">
+      <UniqueIdentifier>{275D161B-E6E4-4C4C-98B7-13C664F30473}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="src\main.py">
+      <Filter>Source</Filter>
+    </None>
+    <None Include="src\rd_eqd2_optimizer.py">
+      <Filter>Source</Filter>
+    </None>
+    <None Include="src\runtime_check.py">
+      <Filter>Source</Filter>
+    </None>
+    <None Include="tools\build.py">
+      <Filter>Build</Filter>
+    </None>
+    <None Include="Build.cmd">
+      <Filter>Build</Filter>
+    </None>
+    <None Include="requirements.txt">
+      <Filter>Build</Filter>
+    </None>
+    <None Include="requirements-build.txt">
+      <Filter>Build</Filter>
+    </None>
+    <None Include="pyproject.toml">
+      <Filter>Build</Filter>
+    </None>
+    <None Include="RD_EQD2_Optimizer.spec">
+      <Filter>Build</Filter>
+    </None>
+    <None Include="README.md">
+      <Filter>Documentation</Filter>
+    </None>
+    <None Include="VALIDATION.md">
+      <Filter>Documentation</Filter>
+    </None>
+    <None Include="samples\prostate.csv">
+      <Filter>Samples</Filter>
+    </None>
+  </ItemGroup>
+</Project>

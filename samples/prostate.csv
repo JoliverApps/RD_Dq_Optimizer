@@ -1,0 +1,9 @@
+﻿name,total_gy,fractions,prescriptions_set,alpha_beta
+Shared conventional reference,78.0,39,Prostate,1.5
+RTOG 0126 IMRT,79.2,44,Prostate,1.5
+RTOG 0415 hypofractionated,70.0,28,Prostate,1.5
+PROFIT hypofractionated,60.0,20,Prostate,1.5
+PACE-B control,62.0,20,Prostate,1.5
+Mantz SBRT,40.0,5,Prostate,1.5
+HYPO-RT-PC ultrahypofractionated,42.7,7,Prostate,1.5
+Fuller SBRT,38.0,4,Prostate,1.5

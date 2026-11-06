@@ -1,0 +1,4 @@
+# Supported build interpreters: CPython 3.11 or 3.12, Windows x64.
+numpy==2.2.6
+matplotlib==3.10.3
+sympy==1.14.0
