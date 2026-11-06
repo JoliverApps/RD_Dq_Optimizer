@@ -1,6 +1,6 @@
 # RD EQD2 Optimizer
 
-RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). Each prescriptions set has a fixed α/β magnitude.
+RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). Each prescriptions set has an α/β input for the q ≥ 0 branch.
 
 The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing eight prescriptions at α/β = 1.5 Gy is available on first launch.
 
@@ -30,7 +30,7 @@ python rd_eqd2_optimizer.py
 
 1. Select the prescriptions sets to analyze.
 2. Open a selected set's tab in **Prescriptions in the viewed set**. Check the **Optimize** boxes for the prescriptions to include. Each selected set needs at least two prescriptions.
-3. Enter **|α/β| (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
+3. Enter **α/β (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
 4. Set **q start**, **q end**, and **q step**, then choose a minimization criterion.
 5. Click **Run optimization**.
 
@@ -38,7 +38,7 @@ Each selected set has its own tab, prescription choices, and α/β entry. Switch
 
 ### Parameters and search interval
 
-The α/β magnitude must be finite and nonzero. It remains fixed during optimization. The candidate parameter q represents the shoulder displacement, and its fitted value is reported as Dq. The sign of α/β follows q.
+Enter a positive finite α/β value for q ≥ 0. The q < 0 branch uses the negative of that entered value. The candidate parameter q represents the shoulder displacement, and its fitted value is reported as Dq. The sign of α/β follows q.
 
 | Candidate q | α/β sign |
 | --- | --- |
@@ -61,7 +61,7 @@ Use a smaller step for a finer grid. If the application reports too many grid po
 
 ## Read the results
 
-The results table reports Dq, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
+The results table reports Dq, α/β for the fitted branch, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
 
 A minimum marked **BOUNDARY** lies at an endpoint of the search interval. A wider interval may help locate an interior minimum. **Outside search** means that the selected interval does not contain both profile-bound crossings.
 
@@ -80,7 +80,7 @@ For α/β = −2 Gy, LQ EQD2 is unavailable because its reference denominator is
 
 Open the **Robustness** tab in the analysis window and click **Run robustness**. Leave-one-out analysis requires at least three prescriptions.
 
-To assess α/β sensitivity, enter comma-separated nonzero magnitudes. Each magnitude is held fixed during its own optimization.
+To assess α/β sensitivity, enter comma-separated positive reference values. Each reference value is used for q ≥ 0 and its negative is used for q < 0.
 
 ## Manage prescriptions sets
 
@@ -96,7 +96,7 @@ The CSV columns are:
 | `total_gy` | Total dose in Gy |
 | `fractions` | Number of fractions |
 | `prescriptions_set` | Set name |
-| `alpha_beta` | Fixed α/β magnitude in Gy |
+| `alpha_beta` | α/β input for q ≥ 0, in Gy |
 
 The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
 

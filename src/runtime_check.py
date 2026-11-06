@@ -16,13 +16,12 @@ def check_math_and_plot_interval(app, folder):
 
     with mp.workdps(80):
         for sign in (1, -1):
-            for magnitude in (1e-6, 1.5, 10, 1e6):
-                ab = sign * magnitude
-                for q_magnitude in (1e-14, 1e-6, 0.01, 1, 1e6, 1e14, 1e20):
-                    q = sign * q_magnitude
-                    a_mp, q_mp = mp.mpf(ab), mp.mpf(q)
+            for ab in (1e-6, 1.5, 10, 1e6):
+                for q_scale in (1e-14, 1e-6, 0.01, 1, 1e6, 1e14, 1e20):
+                    q = sign * q_scale
+                    a_mp, q_mp = sign * mp.mpf(ab), mp.mpf(q)
                     root = mp.sqrt(1 + 2 * a_mp / q_mp)
-                    rate = (root - 1) / a_mp if ab > 0 else (-1 - root) / a_mp
+                    rate = (root - 1) / a_mp if sign > 0 else (-1 - root) / a_mp
                     reserve = q_mp * rate
                     doses = (0.01, 1.8, 2.0, 9.5, 100)
                     expected_bed = [
@@ -35,7 +34,7 @@ def check_math_and_plot_interval(app, folder):
                     np.testing.assert_allclose(
                         app.EQD2_FN(ab, q, doses, 20), expected_eqd2, rtol=1e-12
                     )
-        for ratio, candidate in ((1.5, 3.5), (-5, -3)):
+        for ratio, candidate in ((1.5, 3.5), (5, -3)):
             np.testing.assert_allclose(
                 app.EQD2_FN(ratio, candidate, np.array([1.8, 2, 6]), 20),
                 app._EQD2_SYMBOLIC_FN(ratio, candidate, np.array([1.8, 2, 6]), 20),
@@ -45,7 +44,7 @@ def check_math_and_plot_interval(app, folder):
     schedules = [("Reference", 60, 30), ("Other", 48, 4)]
     grid = app.grid_values(-3.2, 4.9, 0.7)
     assert grid[0] == -3.2 and grid[-1] == 4.9 and 0 in grid
-    cases = [(10, -20.3, 13.7), (-10, -14.3, 6.2)]
+    cases = [(10, -20.3, 13.7), (10, -14.3, 6.2)]
     for ab, start, stop in cases:
         fitted = app.analyze(ab, start, stop, 0.9, schedules)
         assert fitted["search_start"] == start and fitted["search_end"] == stop
@@ -71,11 +70,11 @@ def check_math_and_plot_interval(app, folder):
 
     with patch.object(app, "evaluate", profile_values):
         bounds = app._profile_bounds(
-            -10, -5, schedules, 1.0, lower=-9, upper=-1, profile=(points, measures)
+            10, -5, schedules, 1.0, lower=-9, upper=-1, profile=(points, measures)
         )
     radius = 4 * np.arcsin(np.sqrt(0.05)) / np.pi
     np.testing.assert_allclose(bounds, [-5 - radius, -5 + radius], atol=1e-11)
-    flat = app.analyze(-10, -9, -1, 0.1, [("A", 60, 30), ("B", 60, 30)])
+    flat = app.analyze(10, -9, -1, 0.1, [("A", 60, 30), ("B", 60, 30)])
     assert flat["profile_bounds"] == (None, None)
 
 
@@ -89,8 +88,7 @@ def check_signed_model(app, folder):
 
     mp.mp.dps = 50
     schedules = [("Reference", 78, 39), ("Large fractions", 30, 5), ("Small fractions", 54, 30)]
-    for reserve, rate in ((0.8, 0.3), (-0.8, 0.3), (-3.0, 0.5)):
-        ab = 2 * (1 - reserve) / (reserve * rate)
+    for reserve, rate, ab in ((0.8, 0.3, 5 / 3), (-0.8, 0.3, 15), (-3.0, 0.5, 16 / 3)):
         q = reserve / rate
 
         def effect(dose, reserve=reserve, rate=rate):
@@ -109,10 +107,10 @@ def check_signed_model(app, folder):
         np.testing.assert_allclose([actual_r[0], actual_s[0]], [reserve, rate], rtol=2e-14)
 
     physical = np.array([total for _, total, _ in schedules])
-    for ab in (1.5, -1.5, -2.0):
+    for ab in (1.5, 2.0, 10):
         np.testing.assert_array_equal(app.evaluate(ab, [0], schedules)[0], physical)
         assert app.EQD2_FN(ab, 0, 3, 10) == 30
-        near = np.copysign(1e-12, ab)
+        near = 1e-12
         np.testing.assert_allclose(app.evaluate(ab, [near], schedules)[0], physical, atol=1e-9)
         boundary = app.analyze(ab, 0, 0, 0.1, schedules)
         detail = app.build_analysis({"name": "Linear boundary", "result": boundary})
@@ -120,11 +118,9 @@ def check_signed_model(app, folder):
         assert all(p["RD_BED_Gy"] == p["D_Gy"] for p in detail["prescriptions"])
         app.export_analysis_tables(detail, folder / f"boundary-{ab}", "json")
         app.draw_dispersion_plot(Figure(), detail)
-    for ab, q in ((1.5, -1), (-1.5, 1)):
-        np.testing.assert_array_equal(
-            app.evaluate(ab, [q], schedules), app.evaluate(-ab, [q], schedules)
-        )
-    for invalid in (0, float("nan"), float("inf"), -float("inf")):
+    values = app.evaluate(1.5, [-1, 0, 1], schedules)
+    assert np.isfinite(values).all()
+    for invalid in (0, -1.5, float("nan"), float("inf"), -float("inf")):
         try:
             app.validated_alpha_beta(invalid)
         except ValueError:
@@ -133,8 +129,9 @@ def check_signed_model(app, folder):
             raise AssertionError("Invalid alpha/beta was accepted")
 
     # Construct isoeffective schedules using independent scalar inversion.
-    ab, q = -5.0, -3.0
-    rate = (1 + mp.sqrt(1 + 2 * ab / q)) / abs(ab)
+    ab, q = 5.0, -3.0
+    selected_ab = -ab
+    rate = (-1 - mp.sqrt(1 + 2 * selected_ab / q)) / selected_ab
 
     def effect(dose):
         return dose - q * (1 - mp.exp(-rate * dose))
@@ -146,7 +143,7 @@ def check_signed_model(app, folder):
     for method in app.OPTIMIZATION_METHODS:
         fitted = app.analyze(ab, -20, 20, 0.02, synthetic, method=method)
         np.testing.assert_allclose(fitted["q"][fitted["idx"]], q, atol=2e-6, rtol=0)
-        assert fitted["ab"] == abs(ab) and fitted["signed_ab"] == ab
+        assert fitted["ab"] == ab and fitted["signed_ab"] == -ab
         assert fitted["q"].min() < 0 < fitted["q"].max()
     fitted = app.analyze(ab, -20, 0, 0.02, schedules)
     detail = app.build_analysis({"name": "Inverse shoulder", "result": fitted})
@@ -159,7 +156,7 @@ def check_signed_model(app, folder):
     mixed = app.analyze_selected(
         [
             {"name": "Positive", "alpha_beta": 1.5, "prescriptions": schedules},
-            {"name": "Negative", "alpha_beta": -5, "prescriptions": schedules},
+            {"name": "Second", "alpha_beta": 5, "prescriptions": schedules},
         ],
         -20,
         20,
@@ -167,11 +164,11 @@ def check_signed_model(app, folder):
     )
     assert len(mixed["sets"]) == 2
     app.export(mixed, folder / "mixed-signs")
-    crossing = app._profile_bounds(-5, -3, synthetic, 0.1, lower=-20, upper=0)
+    crossing = app._profile_bounds(5, -3, synthetic, 0.1, lower=-20, upper=0)
     assert crossing[0] < -3 < crossing[1]
     for q_crossing in crossing:
         np.testing.assert_allclose(
-            app.evaluate(-5, [q_crossing], synthetic)[0].std(ddof=1),
+            app.evaluate(5, [q_crossing], synthetic)[0].std(ddof=1),
             0.105,
             atol=1e-10,
         )
@@ -195,7 +192,7 @@ def check_signed_model(app, folder):
     store = app.PrescriptionStore(path, app.DEFAULT_SETS)
     assert len(store.list_sets()) == 1
     assert store.get_set(7)["prescriptions"] == [("Reference", 78, 39), ("Other", 30, 5)]
-    store.update_alpha_beta(7, -5)
+    store.update_alpha_beta(7, 5)
     reopened = app.PrescriptionStore(path)
     assert reopened.get_set(7)["alpha_beta"] == 5
     app.export_prescriptions_set(reopened.get_set(7), folder / "signed.csv")
@@ -212,7 +209,7 @@ def check_signed_model(app, folder):
 
 
 def check_full_signed_profile(app, folder):
-    """Check both branches for one magnitude and the 15-prescription NSCLC set."""
+    """Check direct q-selected signs and the 15-prescription NSCLC set."""
     import numpy as np
     from matplotlib.figure import Figure
 
@@ -246,9 +243,9 @@ def check_full_signed_profile(app, folder):
     )
     reserve, rate = app.rd_parameters(10, [-3, 3])
     np.testing.assert_allclose(2 * (1 - reserve) / (reserve * rate), [-10, 10], rtol=1e-13)
-    for magnitude in (10, -10):
-        zero = app.analyze(magnitude, 0, 0, 0.1, nsclc)
-        assert zero["signed_ab"] == 10 and zero["q"].tolist() == [0]
+    for ab in (10, 20):
+        zero = app.analyze(ab, 0, 0, 0.1, nsclc)
+        assert zero["signed_ab"] == ab and zero["q"].tolist() == [0]
 
     # Around zero EQD2 approaches the same smooth rational curve from both sides.
     q = np.array([-1e-4, -1e-6, 0, 1e-6, 1e-4])
@@ -434,7 +431,7 @@ def check_gui(app, db_path, result):
                 )
                 for text in ("Plot settings…", "Export image…"):
                     button(text).invoke()
-                root.setvar(ab_entry.cget("textvariable"), "-2")
+                root.setvar(ab_entry.cget("textvariable"), "2")
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
                 assert float(row[2]) == 2
@@ -520,7 +517,7 @@ def run_checks(report_path, include_gui=True):
             passed("SSE, SD, and range optimization")
             check_signed_model(app, folder)
             passed(
-                "Signed fixed-ratio branches, zero limit, independent hazard integration, migration and exports"
+                "Q-selected branches, zero limit, independent hazard integration, storage and exports"
             )
             check_math_and_plot_interval(app, folder)
             passed(
@@ -581,7 +578,7 @@ def run_checks(report_path, include_gui=True):
             )
             state.sync(records)
             assert state.configured_set(prostate) == configured
-            for bad in ("", "0", "nan", "inf", "abc"):
+            for bad in ("", "0", "-1", "nan", "inf", "abc"):
                 state.alpha_beta_text[str(prostate["id"])] = bad
                 try:
                     state.configured_set(prostate)
