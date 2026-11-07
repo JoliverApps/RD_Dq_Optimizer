@@ -153,6 +153,12 @@ Install:
 - Visual Studio 2022 with **Desktop development with C++** and **MSVC v143**.
 - 64-bit Python 3.11 or 3.12 with pip, venv, Tcl/Tk, and the Python launcher.
 
+If you use Python Install Manager, install the build runtime before building:
+
+```text
+py install 3.12
+```
+
 Open `RD_EQD2_Optimizer.sln`, select **Release | x64**, and choose **Build > Build Solution**. The first build requires internet access to install dependencies. Run the resulting `dist\Release\RD_EQD2_Optimizer.exe`.
 
 To build from Command Prompt, run:
@@ -176,5 +182,6 @@ A Release build produces a single executable. A Debug build produces `dist\Debug
 | --- | --- |
 | Missing NumPy, Matplotlib, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
 | Tkinter is unavailable | Install Tcl/Tk support for the selected Python interpreter. |
+| Build exits with code −1610612730 (0xA0000006) | Python Install Manager could not launch the requested runtime with automatic installation disabled. Run `py install 3.12`, then build again. |
 | Too many grid points | Increase q step or narrow the interval. |
 | A Windows executable reports a startup error | Check `application.log` in the data folder. |
