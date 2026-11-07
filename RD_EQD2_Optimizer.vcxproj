@@ -41,6 +41,7 @@
     <None Include="rd_eqd2_optimizer.py" />
     <None Include="src\runtime_check.py" />
     <None Include="tools\build.py" />
+    <None Include="tools\debug_signing.py" />
     <None Include="Build.cmd" />
     <None Include="requirements.txt" />
     <None Include="requirements-build.txt" />

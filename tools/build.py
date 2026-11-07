@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from debug_signing import sign_debug_executable
+
 ROOT = Path(__file__).resolve().parents[1]
 ENV_DIR = ROOT / ".venv-build"
 ENV_PYTHON = ENV_DIR / "Scripts" / "python.exe"
@@ -142,6 +144,7 @@ def main():
     )
     if not executable.is_file():
         raise RuntimeError("The build did not produce " + str(executable))
+    signing = sign_debug_executable(executable) if args.configuration == "Debug" else None
     self_test([executable], work / "executable-test.json")
     packages = subprocess.check_output(
         [str(python), "-m", "pip", "freeze"], text=True, env=build_environment()
@@ -154,6 +157,7 @@ def main():
         "dependencies": packages.splitlines(),
         "source_test": "passed",
         "executable_test": "passed",
+        "signing": signing,
     }
     (dist / "build-info.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print("\nBuild and executable verification passed.\n" + str(executable))

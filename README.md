@@ -176,6 +176,30 @@ Build.cmd Build Release
 
 A Release build produces a single executable. A Debug build produces `dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe`; distribute its entire containing folder, including `_internal`.
 
+### Sign local Debug builds
+
+Install a Windows 10 or Windows 11 SDK through **Visual Studio Installer → Modify → Individual components**. This supplies SignTool.
+
+Open **View → Terminal** in Visual Studio and use the repository folder:
+
+```powershell
+cd "$env:USERPROFILE\source\repos\RD_Dq_Optimizer"
+py -3.12 tools\debug_signing.py setup
+```
+
+Read the certificate trust description and type `TRUST` to confirm. Windows may also ask you to confirm trusting the certificate. The setup creates a one-year RSA code-signing certificate and trusts its public certificate in the current user's Root and TrustedPublisher stores. The non-exportable private key remains in the current user's Personal certificate store; it is not written to the repository. Only the certificate thumbprint is saved in `%LOCALAPPDATA%\RD_EQD2_Optimizer\debug-signing.json`. Repeating setup reuses an existing unexpired certificate.
+
+Select **Debug | x64 → Build Solution**, or run:
+
+```powershell
+.\Build.cmd Build Debug
+.\dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe
+```
+
+Configured Debug builds sign the executable, verify its Authenticode signature, then run the executable's checks. Release builds do not use the development certificate. The certificate provides trust for local testing under the configured Windows account, not other computers or public distribution. Smart App Control requires a certificate issued by a trusted provider and can still block this locally signed executable.
+
+To stop signing Debug builds, delete the local `debug-signing.json` settings file. To remove the development certificate's trust, run `certmgr.msc` and remove the certificate named **RD EQD2 Optimizer Local Debug** from **Trusted Root Certification Authorities → Certificates**, **Trusted Publishers → Certificates**, and **Personal → Certificates**, matching its thumbprint to the value printed during setup.
+
 ## Troubleshooting
 
 | Problem | Action |

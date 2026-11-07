@@ -27,6 +27,9 @@
     <None Include="tools\build.py">
       <Filter>Build</Filter>
     </None>
+    <None Include="tools\debug_signing.py">
+      <Filter>Build</Filter>
+    </None>
     <None Include="Build.cmd">
       <Filter>Build</Filter>
     </None>
