@@ -89,6 +89,8 @@ To assess α/β sensitivity, enter comma-separated positive reference values. Ea
 
 Use **New prescriptions set**, **Edit prescriptions set**, and **Delete prescriptions set** to manage saved data. Each prescription requires a name, a positive total dose in Gy, and a positive integer number of fractions.
 
+The first prescription with 2 Gy per fraction is used automatically as the reference. In the set editor, select a prescription's **Reference** button to override this choice, or select **Automatic reference** to restore it. The saved choice follows that row when its name, dose, or fraction count is edited. The main prescription list marks the reference, and the analysis window fills **Reference EQD2 (Gy)** with its RD EQD2 at the fitted Dq. The reference remains available when unchecked for optimization. Sets without a 2 Gy/fraction prescription or an explicit choice leave the reference blank; it can also be entered directly in the analysis window.
+
 Use **Export prescriptions set…** to save the viewed set's checked prescriptions and current α/β as CSV. Use **Import prescriptions set…** to load a CSV file.
 
 The CSV columns are:
@@ -100,15 +102,16 @@ The CSV columns are:
 | `fractions` | Number of fractions |
 | `prescriptions_set` | Set name |
 | `alpha_beta` | α/β input for q ≥ 0, in Gy |
+| `is_reference` | Optional 1 for the chosen reference row, 0 or blank otherwise; at most one row may be marked |
 
 The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
 
 ## Export data and plots
 
 - **Export results + graph** saves the optimization grid, optimal prescription values, and an optimization plot.
-- **Export image…** saves the optimization plot as PNG, JPEG, or EPS with a selected resolution.
+- **Export image…** saves the optimization plot as PDF, JPG, PNG, EPS, or SVG, in that order, with a selected resolution.
 - **Plot settings…** controls titles, labels, fonts, colors, dimensions, and vertical axis limits. The horizontal axis spans q start to q end.
-- The analysis window exports tables as CSV, TSV, JSON, or LaTeX, and dispersion plots as PNG, JPEG, EPS, PDF, or SVG.
+- The analysis window exports tables as CSV, TSV, JSON, or LaTeX, and offers the same PDF, JPG, PNG, EPS, and SVG choices for dispersion plots. PDF, EPS, and SVG preserve vector lines and text; PPI controls raster resolution.
 
 ## Command-line use
 

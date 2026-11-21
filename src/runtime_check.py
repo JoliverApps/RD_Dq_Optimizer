@@ -312,6 +312,97 @@ def check_signed_reconstruction(app):
     assert rates[0] > rates[1] > 0
 
 
+def check_reference_prescriptions(app, folder):
+    """Persist overrides and resolve automatic references outside the fitted subset."""
+    import sqlite3
+
+    import numpy as np
+
+    rows = [("Conventional", 78, 39), ("Other conventional", 60, 30), ("SBRT", 40, 5)]
+    store = app.PrescriptionStore(folder / "references.sqlite3")
+    key = store.save_set("References", 1.5, rows)
+    record = store.get_set(key)
+    assert record["reference_prescription"] is None
+    assert app.reference_schedule(record) == rows[0]
+    state = app.PrescriptionsSelection()
+    state.sync([record])
+    state.set_included(record, [0], False)
+    configured = state.configured_set(record)
+    fitted = app.analyze_selected([configured], 0.01, 10, 0.1)["sets"][0]
+    detail = app.build_analysis(fitted)
+    assert detail["reference"] == 78 and detail["reference_prescription"] == rows[0]
+    assert detail["models"]["RD"]["N"] == 2
+
+    store.save_set("References", 1.5, rows, set_id=key, reference_prescription=rows[2])
+    reopened = app.PrescriptionStore(store.path)
+    record = reopened.get_set(key)
+    assert record["reference_prescription"] == rows[2]
+    state.sync([record])
+    state.set_included(record, [0, 1], True)
+    state.set_included(record, [2], False)
+    for start, stop in ((0.01, 10), (-10, -0.01), (0, 0)):
+        fitted = app.analyze_selected([state.configured_set(record)], start, stop, 0.1)["sets"][0]
+        detail = app.build_analysis(fitted)
+        expected = app.EQD2_FN(1.5, detail["D_q"], 8, 5)
+        np.testing.assert_allclose(detail["reference"], expected, rtol=1e-13)
+        assert detail["reference_prescription"] == rows[2]
+        assert len(detail["prescriptions"]) == 2
+    csv_path = folder / "reference-set.csv"
+    app.export_prescriptions_set(record, csv_path)
+    imported = app.read_prescriptions_set_csv(csv_path)
+    assert imported["reference_prescription"] == rows[2]
+    assert imported["prescriptions"] == record["prescriptions"]
+    with csv_path.open(encoding="utf-8-sig") as stream:
+        csv_rows = list(csv.DictReader(stream))
+    csv_rows[0]["is_reference"] = "1"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=csv_rows[0])
+        writer.writeheader()
+        writer.writerows(csv_rows)
+    try:
+        app.read_prescriptions_set_csv(csv_path)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CSV accepted two reference prescriptions")
+
+    edited = [*rows[:2], ("Edited SBRT", 38, 4)]
+    store.save_set("References", 1.5, edited, set_id=key, reference_prescription=edited[2])
+    assert store.get_set(key)["reference_prescription"] == edited[2]
+    store.save_set("References", 1.5, edited, set_id=key)
+    assert app.reference_schedule(store.get_set(key)) == rows[0]
+    try:
+        store.save_set(
+            "References", 1.5, rows, set_id=key, reference_prescription=("Missing", 20, 10)
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Accepted a reference outside the saved prescriptions")
+    assert store.get_set(key)["prescriptions"] == edited
+    no_reference = {"prescriptions": [("A", 60, 20), ("B", 40, 5)]}
+    assert app.reference_schedule(no_reference) is None
+    fitted = app.analyze(1.5, 0.01, 10, 0.1, no_reference["prescriptions"])
+    assert app.build_analysis({"result": fitted})["reference"] is None
+
+    # Opening an older database must add the flag without changing saved data.
+    old_path = folder / "legacy-references.sqlite3"
+    with sqlite3.connect(old_path) as con:
+        con.executescript("""
+            CREATE TABLE tumors(id INTEGER PRIMARY KEY, name TEXT, alpha_beta REAL);
+            CREATE TABLE prescriptions(id INTEGER PRIMARY KEY, tumor_id INTEGER,
+                name TEXT, total_gy REAL, fractions INTEGER, position INTEGER);
+            INSERT INTO tumors VALUES(1, 'Legacy', 1.5);
+            INSERT INTO prescriptions VALUES(11, 1, 'Conventional', 78, 39, 0);
+            INSERT INTO prescriptions VALUES(12, 1, 'SBRT', 40, 5, 1);
+        """)
+    migrated = app.PrescriptionStore(old_path)
+    assert app.reference_schedule(migrated.get_set(1)) == rows[0]
+    migrated = app.PrescriptionStore(old_path)
+    with migrated._connection() as con:
+        assert [r[0] for r in con.execute("SELECT id FROM prescriptions ORDER BY id")] == [11, 12]
+
+
 def check_gui(app, db_path, result):
     import tkinter as tk
     import traceback
@@ -482,6 +573,73 @@ def check_gui(app, db_path, result):
                 optimize.invoke()
                 button("Analysis…").invoke()
                 root.update_idletasks()
+                # Close earlier dialogs before exercising the reference editor.
+                for child in root.winfo_children():
+                    if isinstance(child, tk.Toplevel):
+                        child.destroy()
+
+                def dialog(title):
+                    return next(
+                        w
+                        for w in children(root)
+                        if isinstance(w, tk.Toplevel) and w.title() == title
+                    )
+
+                button("Edit prescriptions set").invoke()
+                editor = dialog("Edit prescriptions set")
+                radios = [w for w in children(editor) if isinstance(w, ttk.Radiobutton)]
+                assert root.getvar(radios[0].cget("variable")) == "auto"
+                radios[-1].invoke()
+                button("Save prescriptions set", editor).invoke()
+                saved = app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)
+                assert saved["reference_prescription"] == app.PROSTATE_PRESCRIPTIONS[-1]
+                _, prescriptions, _ = view(app.PROSTATE_SET_NAME)
+                assert prescriptions.set("7", "reference") == "Yes"
+                optimize.invoke()
+                button("Analysis…").invoke()
+                analysis = dialog("RD EQD2 — Detailed analysis")
+                reference_entry = next(
+                    w
+                    for w in children(analysis)
+                    if isinstance(w, ttk.Entry) and w.cget("width") == 9
+                )
+                expected = app.build_analysis(
+                    app.analyze_selected(
+                        [dict(saved, alpha_beta=2.0, prescriptions=saved["prescriptions"][1:])],
+                        -50,
+                        50,
+                        0.05,
+                    )["sets"][0]
+                )["reference"]
+                assert abs(float(reference_entry.get()) - expected) < 1e-8
+                for owner, trigger, title in (
+                    (analysis, "Export dispersion plot…", "Export dispersion plot"),
+                    (root, "Export image…", "Export plot image"),
+                ):
+                    button(trigger, owner).invoke()
+                    image_dialog = dialog(title)
+                    fmt = next(w for w in children(image_dialog) if isinstance(w, ttk.Combobox))
+                    assert tuple(fmt.cget("values")) == tuple(app.IMAGE_FORMATS)
+                    assert fmt.get() == "PDF"
+                    button("Cancel", image_dialog).invoke()
+                analysis.destroy()
+
+                # Reopening restores the explicit choice; returning to automatic uses 78 Gy.
+                button("Edit prescriptions set").invoke()
+                editor = dialog("Edit prescriptions set")
+                radios = [w for w in children(editor) if isinstance(w, ttk.Radiobutton)]
+                assert root.getvar(radios[0].cget("variable")) == str(radios[-1].cget("value"))
+                radios[0].invoke()
+                button("Save prescriptions set", editor).invoke()
+                optimize.invoke()
+                button("Analysis…").invoke()
+                analysis = dialog("RD EQD2 — Detailed analysis")
+                reference_entry = next(
+                    w
+                    for w in children(analysis)
+                    if isinstance(w, ttk.Entry) and w.cget("width") == 9
+                )
+                assert float(reference_entry.get()) == 78
                 if failures:
                     raise RuntimeError("; ".join(failures))
                 completed.append(True)
@@ -566,6 +724,10 @@ def run_checks(report_path, include_gui=True):
             passed("Full 15-prescription NSCLC profile, q-dependent signs, and smooth unique zero")
             check_signed_reconstruction(app)
             passed("Primitive RD parameters, signed classical descriptors, and direct H/BED/EQD2")
+            check_reference_prescriptions(app, folder)
+            passed(
+                "Automatic and chosen reference prescriptions, subsets, CSV, and legacy migration"
+            )
 
             store = app.PrescriptionStore(folder / "prescriptions.sqlite3", app.DEFAULT_SETS)
             assert len(store.list_sets()) == 1, "Only prostate may be seeded by default"
@@ -674,19 +836,29 @@ def run_checks(report_path, include_gui=True):
             passed("CSV import with Unicode and UTF-8 BOM")
 
             app.export(result, folder / "results")
-            for extension in (".png", ".jpg", ".eps"):
+            assert list(app.IMAGE_FORMATS) == ["PDF", "JPG", "PNG", "EPS", "SVG"]
+            for extension in app.IMAGE_FORMATS.values():
                 app.export_image(result, folder / ("profile" + extension), ppi=72)
             details = app.build_analysis({"name": "Prostate", "result": result})
             robustness = app.run_robustness(details)
             assert len(robustness["leave_one_out"]) == 8
-            for extension in (".png", ".jpg", ".eps", ".pdf", ".svg"):
+            for extension in app.IMAGE_FORMATS.values():
                 app.export_dispersion_plot(details, folder / ("dispersion" + extension), ppi=72)
             for format_name in ("csv", "tsv", "json", "tex"):
                 paths = app.export_analysis_tables(details, folder / "tables", format=format_name)
                 assert paths and all(p.is_file() and p.stat().st_size for p in paths)
-            for path in folder.glob("profile.*"):
-                assert path.stat().st_size > 100
-            passed("Image export: PNG, JPEG, EPS, PDF, SVG")
+            signatures = {
+                ".pdf": b"%PDF",
+                ".jpg": b"\xff\xd8",
+                ".png": b"\x89PNG",
+                ".eps": b"%!PS",
+                ".svg": b"<?xml",
+            }
+            for stem in ("profile", "dispersion"):
+                for extension, signature in signatures.items():
+                    data = (folder / (stem + extension)).read_bytes()
+                    assert len(data) > 100 and data.startswith(signature)
+            passed("Both plot exports: PDF, JPG, PNG, EPS, SVG with correct file signatures")
             passed("Analysis, robustness, and CSV/TSV/JSON/LaTeX export")
 
             store.save_set(

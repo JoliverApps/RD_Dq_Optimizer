@@ -3,7 +3,7 @@
 
 Run this file to open the GUI. Dependencies: numpy, matplotlib, sympy, and Tkinter.
 The prostate set contains eight prescriptions at alpha/beta=1.5 Gy.
-CSV import: name,total_gy,fractions; optional prescriptions_set,alpha_beta columns.
+CSV import: name,total_gy,fractions; optional prescriptions_set,alpha_beta,is_reference columns.
 Select individual prescriptions and edit alpha/beta directly on the main page.
 Batch example: python rd_eqd2_optimizer.py --batch --dataset prostate --out results
 """
@@ -145,6 +145,16 @@ class PrescriptionStore:
                 CREATE INDEX IF NOT EXISTS idx_prescriptions_tumor ON prescriptions(tumor_id, position);
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            columns = {row["name"] for row in con.execute("PRAGMA table_info(prescriptions)")}
+            if "is_reference" not in columns:
+                con.execute(
+                    "ALTER TABLE prescriptions ADD COLUMN is_reference INTEGER NOT NULL "
+                    "DEFAULT 0 CHECK (is_reference IN (0,1))"
+                )
+            con.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_reference_per_set "
+                "ON prescriptions(tumor_id) WHERE is_reference=1"
+            )
             marker = "default_prescriptions_sets_seeded"
             if (
                 seed_defaults
@@ -159,9 +169,20 @@ class PrescriptionStore:
                         (name, validated_alpha_beta(dataset["alpha_beta"])),
                     )
                     con.executemany(
-                        "INSERT INTO prescriptions (tumor_id,name,total_gy,fractions,position) VALUES (?,?,?,?,?)",
+                        "INSERT INTO prescriptions (tumor_id,name,total_gy,fractions,position,is_reference) "
+                        "VALUES (?,?,?,?,?,?)",
                         [
-                            (cursor.lastrowid, str(label), float(dose), int(fractions), position)
+                            (
+                                cursor.lastrowid,
+                                str(label),
+                                float(dose),
+                                int(fractions),
+                                position,
+                                int(
+                                    (label, dose, fractions)
+                                    == dataset.get("reference_prescription")
+                                ),
+                            )
                             for position, (label, dose, fractions) in enumerate(
                                 dataset["prescriptions"]
                             )
@@ -186,13 +207,22 @@ class PrescriptionStore:
             if row is None:
                 raise KeyError(f"Prescriptions set {set_id} does not exist.")
             data = dict(row)
+            prescriptions = con.execute(
+                "SELECT name,total_gy,fractions,is_reference FROM prescriptions "
+                "WHERE tumor_id=? ORDER BY position,id",
+                (set_id,),
+            ).fetchall()
             data["prescriptions"] = [
-                (r["name"], r["total_gy"], r["fractions"])
-                for r in con.execute(
-                    "SELECT name,total_gy,fractions FROM prescriptions WHERE tumor_id=? ORDER BY position,id",
-                    (set_id,),
-                )
+                (r["name"], r["total_gy"], r["fractions"]) for r in prescriptions
             ]
+            data["reference_prescription"] = next(
+                (
+                    row
+                    for row, saved in zip(data["prescriptions"], prescriptions)
+                    if saved["is_reference"]
+                ),
+                None,
+            )
             return data
 
     def find_set(self, name):
@@ -200,7 +230,7 @@ class PrescriptionStore:
             row = con.execute("SELECT id FROM tumors WHERE name=?", (name,)).fetchone()
         return self.get_set(row["id"]) if row else None
 
-    def save_set(self, name, alpha_beta, prescriptions, set_id=None):
+    def save_set(self, name, alpha_beta, prescriptions, set_id=None, reference_prescription=None):
         name = str(name).strip()
         if not name:
             raise ValueError("Prescriptions set name is required.")
@@ -208,6 +238,12 @@ class PrescriptionStore:
             raise ValueError("Prescriptions set name must not exceed 120 characters.")
         ab = validated_alpha_beta(alpha_beta)
         rows = validate_schedules(prescriptions)
+        if reference_prescription is not None:
+            reference_prescription = validate_schedules([reference_prescription, rows[0]])[0]
+            if reference_prescription not in rows:
+                raise ValueError(
+                    "The reference prescription must belong to this prescriptions set."
+                )
         labels = [row[0].casefold() for row in rows]
         if len(labels) != len(set(labels)):
             raise ValueError("Each prescription name must be unique within a prescriptions set.")
@@ -226,8 +262,12 @@ class PrescriptionStore:
                         raise KeyError(f"Prescriptions set {set_id} does not exist.")
                     con.execute("DELETE FROM prescriptions WHERE tumor_id=?", (set_id,))
                 con.executemany(
-                    "INSERT INTO prescriptions(tumor_id,name,total_gy,fractions,position) VALUES (?,?,?,?,?)",
-                    [(set_id, label, total, n, i) for i, (label, total, n) in enumerate(rows)],
+                    "INSERT INTO prescriptions(tumor_id,name,total_gy,fractions,position,is_reference) "
+                    "VALUES (?,?,?,?,?,?)",
+                    [
+                        (set_id, *row, i, int(row == reference_prescription))
+                        for i, row in enumerate(rows)
+                    ],
                 )
             except sqlite3.IntegrityError as exc:
                 raise ValueError(
@@ -258,6 +298,21 @@ def validated_alpha_beta(value):
     if not math.isfinite(ab) or ab <= 0:
         raise ValueError("Enter a positive finite α/β value for the q ≥ 0 branch.")
     return ab
+
+
+def reference_schedule(record):
+    """Use the saved choice, or the first 2 Gy/fraction prescription in set order."""
+    reference = record.get("reference_prescription")
+    if reference is not None:
+        return tuple(reference)
+    return next(
+        (
+            tuple(row)
+            for row in record["prescriptions"]
+            if math.isclose(row[1] / row[2], REFERENCE_DOSE_GY, rel_tol=0, abs_tol=1e-10)
+        ),
+        None,
+    )
 
 
 class PrescriptionsSelection:
@@ -306,7 +361,12 @@ class PrescriptionsSelection:
             ab = validated_alpha_beta(self.alpha_beta_text[str(record["id"])])
         except ValueError as exc:
             raise ValueError(f"{record['name']}: {exc}") from exc
-        return dict(record, prescriptions=rows, alpha_beta=ab)
+        return dict(
+            record,
+            prescriptions=rows,
+            alpha_beta=ab,
+            reference_prescription=reference_schedule(record),
+        )
 
 
 def validate_schedules(schedules):
@@ -865,6 +925,7 @@ def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0)
             method=method,
             bound_pct=bound_pct,
         )
+        res["reference_prescription"] = reference_schedule(record)
         result_sets.append({"name": record["name"], "id": record.get("id"), "result": res})
     return {"method": method, "bound_pct": float(bound_pct), "sets": result_sets}
 
@@ -962,7 +1023,8 @@ def export(result, folder):
     export_image(result, folder / "range.png", ppi=160)
 
 
-IMAGE_FORMATS = {"PNG": ".png", "JPG": ".jpg", "EPS": ".eps"}
+IMAGE_FORMATS = {"PDF": ".pdf", "JPG": ".jpg", "PNG": ".png", "EPS": ".eps", "SVG": ".svg"}
+IMAGE_EXTENSIONS = {*IMAGE_FORMATS.values(), ".jpeg"}
 
 
 def _validated_ppi(value):
@@ -976,10 +1038,10 @@ def _validated_ppi(value):
 
 
 def export_image(result, filename, ppi=300):
-    """Save the current optimization plot in PNG, JPEG, or EPS format.
+    """Save the current optimization plot in PDF, JPEG, PNG, EPS, or SVG format.
 
-    EPS preserves vector linework and lettering. PPI controls raster output
-    resolution and any rasterized artists in an EPS file.
+    PDF, EPS and SVG preserve vector linework and lettering. PPI controls
+    raster output resolution and any rasterized artists in a vector file.
     """
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
@@ -988,8 +1050,8 @@ def export_image(result, filename, ppi=300):
         raise ValueError("Run optimization before exporting an image.")
     destination = Path(filename)
     ext = destination.suffix.casefold()
-    if ext not in (".png", ".jpg", ".jpeg", ".eps"):
-        raise ValueError("Image format must be PNG, JPEG (.jpg), or EPS.")
+    if ext not in IMAGE_EXTENSIONS:
+        raise ValueError("Image format must be PDF, JPG, PNG, EPS, or SVG.")
     ppi = _validated_ppi(ppi)
     if not destination.parent.is_dir():
         raise FileNotFoundError(f"Output folder does not exist: {destination.parent}")
@@ -1048,6 +1110,7 @@ def read_prescriptions_set_csv(path):
 
     Required columns: name,total_gy,fractions (also accepts prescription,D,n).
     Optional prescriptions_set and alpha_beta columns describe one consistent set.
+    An is_reference column may mark one prescription as the reference.
     The tumor header is also accepted. Plain CSVs use the filename as set name
     and leave alpha/beta blank for the import editor. UTF-8 BOM and comma/semicolon/tab delimiters are accepted.
     """
@@ -1079,13 +1142,15 @@ def read_prescriptions_set_csv(path):
         "alpha_over_beta": "alpha_beta",
         "alpha_beta_gy": "alpha_beta",
         "ab": "alpha_beta",
+        "is_reference": "is_reference",
+        "reference": "is_reference",
     }
 
     def column_name(value):
         value = str(value).strip().casefold().replace("α", "alpha").replace("β", "beta")
         return aliases.get(re.sub(r"[\s/()\-]+", "_", value).strip("_"), value)
 
-    schedules, set_names, alpha_betas = [], [], []
+    schedules, set_names, alpha_betas, references = [], [], [], []
     try:
         with open(path, encoding="utf-8-sig", newline="") as fp:
             sample = fp.read(8192)
@@ -1101,7 +1166,7 @@ def read_prescriptions_set_csv(path):
             if not {"name", "total_gy", "fractions"}.issubset(headers):
                 raise ValueError(
                     "CSV requires name,total_gy,fractions columns (or prescription,D,n). "
-                    "Optional columns: prescriptions_set,alpha_beta."
+                    "Optional columns: prescriptions_set,alpha_beta,is_reference."
                 )
             reader.fieldnames = headers
             for row in reader:
@@ -1137,6 +1202,11 @@ def read_prescriptions_set_csv(path):
                         f"CSV line {line}: total dose must be positive and fractions a positive integer."
                     )
                 schedules.append((label, total, int(fx)))
+                flag = (row.get("is_reference") or "").strip().casefold()
+                if flag not in ("", "0", "false", "no", "1", "true", "yes"):
+                    raise ValueError(f"CSV line {line}: is_reference must be 0 or 1.")
+                if flag in ("1", "true", "yes"):
+                    references.append(schedules[-1])
                 set_name = (row.get("prescriptions_set") or "").strip()
                 if set_name:
                     set_names.append(set_name)
@@ -1158,6 +1228,8 @@ def read_prescriptions_set_csv(path):
     schedules = validate_schedules(schedules)
     if len({label.casefold() for label, _, _ in schedules}) != len(schedules):
         raise ValueError("CSV prescription names must be unique within the prescriptions set.")
+    if len(references) > 1:
+        raise ValueError("Choose only one reference prescription per prescriptions set.")
     if len({name.casefold() for name in set_names}) > 1:
         raise ValueError(
             "Import one prescriptions set per CSV: the set column contains different names."
@@ -1172,6 +1244,7 @@ def read_prescriptions_set_csv(path):
         "name": set_names[0] if set_names else Path(path).stem,
         "alpha_beta": alpha_betas[0] if alpha_betas else None,
         "prescriptions": schedules,
+        "reference_prescription": references[0] if references else None,
     }
 
 
@@ -1185,9 +1258,13 @@ def export_prescriptions_set(record, filename):
     path = Path(filename)
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["name", "total_gy", "fractions", "prescriptions_set", "alpha_beta"])
+        writer.writerow(
+            ["name", "total_gy", "fractions", "prescriptions_set", "alpha_beta", "is_reference"]
+        )
+        reference = record.get("reference_prescription")
         for label, total, fractions in rows:
-            writer.writerow([label, total, fractions, name, ab])
+            is_reference = reference is not None and (label, total, fractions) == tuple(reference)
+            writer.writerow([label, total, fractions, name, ab, int(is_reference)])
     return path
 
 
@@ -1502,11 +1579,18 @@ def build_analysis(dataset):
         for model in ("RD", "LQ")
     }
     lo, hi = r["profile_bounds"]
-    refs = {
-        p["D_Gy"]
-        for p in prescriptions
-        if math.isclose(p["d_Gy"], REFERENCE_DOSE_GY, abs_tol=1e-10)
-    }
+    reference_row = reference_schedule(
+        {
+            "prescriptions": r["schedules"],
+            "reference_prescription": dataset.get(
+                "reference_prescription", r.get("reference_prescription")
+            ),
+        }
+    )
+    reference = None
+    if reference_row is not None:
+        _, total, fractions = reference_row
+        reference = float(EQD2_FN(input_ab, dq, total / fractions, fractions))
     return {
         "name": dataset.get("name") or "Prescriptions set",
         "alpha_beta": ab,
@@ -1520,7 +1604,8 @@ def build_analysis(dataset):
         "bounds": (lo, hi),
         "bound_pct": r["bound_pct"],
         "profile_measure": r["profile_measure"],
-        "reference": next(iter(refs)) if len(refs) == 1 else None,
+        "reference": reference,
+        "reference_prescription": reference_row,
         "boundary": i in (0, len(r["q"]) - 1),
         "source_result": r,
         "robustness": None,
@@ -1532,6 +1617,11 @@ def analysis_summary(a):
     rows = [
         ("Prescriptions set", a["name"]),
         ("Prescriptions (N)", rd["N"]),
+        (
+            "Reference prescription",
+            a["reference_prescription"][0] if a["reference_prescription"] else "N/A",
+        ),
+        ("Reference EQD2 (Gy)", a["reference"]),
         ("Selected α/β (Gy)", a["alpha_beta"]),
         ("Input α/β (Gy, q ≥ 0)", a["input_alpha_beta"]),
         ("Dq (Gy)", a["D_q"]),
@@ -1987,8 +2077,8 @@ def export_dispersion_plot(a, filename, ppi=300, **options):
 
     ppi = _validated_ppi(ppi)
     path = Path(filename)
-    if path.suffix.lower() not in (".png", ".jpg", ".jpeg", ".eps", ".pdf", ".svg"):
-        raise ValueError("Choose PNG, JPEG, EPS, PDF, or SVG.")
+    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise ValueError("Image format must be PDF, JPG, PNG, EPS, or SVG.")
     fig = Figure(figsize=(8, 7.2), dpi=100)
     FigureCanvasAgg(fig)
     options.setdefault("reference", a["reference"])
@@ -2000,6 +2090,12 @@ def export_dispersion_plot(a, filename, ppi=300, **options):
                 if alpha is not None and alpha < 1:
                     line.set_color(tuple(alpha * x + 1 - alpha for x in (0.718, 0.718, 0.718)))
                     line.set_alpha(1)
+            for text in axis.texts:
+                box = text.get_bbox_patch()
+                if box is not None:
+                    box.set_alpha(1)
+            if axis.get_legend() is not None:
+                axis.get_legend().get_frame().set_alpha(1)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=int(ppi), facecolor="white", bbox_inches="tight", pad_inches=0.08)
     fig.clear()
@@ -2336,14 +2432,14 @@ def open_analysis_window(parent, result):
         dialog.grab_set()
         body = ttk.Frame(dialog, padding=16)
         body.pack()
-        fmt = tk.StringVar(value="PNG")
+        fmt = tk.StringVar(value=next(iter(IMAGE_FORMATS)))
         ppi = tk.StringVar(value="300")
         ttk.Label(body, text="Image format").grid(row=0, column=0, pady=5, sticky="w")
         ttk.Combobox(
             body,
             textvariable=fmt,
             state="readonly",
-            values=("PNG", "JPG", "EPS", "PDF", "SVG"),
+            values=list(IMAGE_FORMATS),
             width=18,
         ).grid(row=0, column=1, padx=8)
         ttk.Label(body, text="Resolution (PPI)").grid(row=1, column=0, pady=5, sticky="w")
@@ -2355,7 +2451,7 @@ def open_analysis_window(parent, result):
                 if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 1200:
                     raise ValueError("PPI must be an integer between 1 and 1200.")
                 display_options = options()
-                ext = "." + fmt.get().lower()
+                ext = IMAGE_FORMATS[fmt.get()]
                 path = filedialog.asksaveasfilename(
                     parent=dialog,
                     title="Save dispersion plot",
@@ -2390,7 +2486,7 @@ def open_analysis_window(parent, result):
             + f"Mean EQD2 = {rd['mean']:.3f} Gy · RSD = {rd['RSD']:.3f}% · η = {_analysis_value(rd['eta'], 5)}%"
             + (" · Optimum at search boundary" if a["boundary"] else "")
         )
-        reference_var.set("" if a["reference"] is None else f"{a['reference']:g}")
+        reference_var.set("" if a["reference"] is None else f"{a['reference']:.12g}")
         ab_values.set(
             ", ".join(
                 f"{v:g}"
@@ -2728,7 +2824,7 @@ def launch_gui(db_path=None):
         numeric_field(typography, "height_in", "Export height (inches)", 0, 1)
         ttk.Label(
             typography,
-            text="Image dimensions affect exported PNG, JPEG and EPS files.\n"
+            text="Image dimensions affect exported PDF, JPG, PNG, EPS and SVG files.\n"
             "Image resolution (PPI) remains selectable in the Export image window.",
             foreground="#555555",
             justify="left",
@@ -2874,7 +2970,14 @@ def launch_gui(db_path=None):
                 "",
                 "end",
                 iid=str(index),
-                values=("☑" if checked else "☐", name, f"{total:g}", fx, f"{total / fx:.4g}"),
+                values=(
+                    "☑" if checked else "☐",
+                    name,
+                    f"{total:g}",
+                    fx,
+                    f"{total / fx:.4g}",
+                    "Yes" if (name, total, fx) == reference_schedule(full) else "",
+                ),
             )
         tree.selection_set([row for row in selected if tree.exists(row)])
         tree.yview_moveto(visible)
@@ -2967,7 +3070,10 @@ def launch_gui(db_path=None):
         details_area = ttk.Frame(frame)
         details_area.pack(fill="both", expand=True)
         tree = ttk.Treeview(
-            details_area, columns=("include", "name", "D", "n", "d"), show="headings", height=8
+            details_area,
+            columns=("include", "name", "D", "n", "d", "reference"),
+            show="headings",
+            height=8,
         )
         for column, heading, width in [
             ("include", "Optimize", 70),
@@ -2975,6 +3081,7 @@ def launch_gui(db_path=None):
             ("D", "D (Gy)", 85),
             ("n", "n", 60),
             ("d", "d (Gy/fraction)", 115),
+            ("reference", "Reference", 80),
         ]:
             tree.heading(column, text=heading)
             tree.column(
@@ -3150,8 +3257,8 @@ def launch_gui(db_path=None):
             if record is None
             else "Edit prescriptions set"
         )
-        dialog.geometry("790x570")
-        dialog.minsize(600, 380)
+        dialog.geometry("920x610")
+        dialog.minsize(840, 420)
         dialog.transient(root)
         dialog.grab_set()
 
@@ -3178,8 +3285,16 @@ def launch_gui(db_path=None):
             body, text="Radiotherapy prescriptions — all fields required", padding=8
         )
         prescriptions.pack(fill="both", expand=True, pady=(10, 6))
+        reference_choice = tk.StringVar(value="auto")
+        ttk.Radiobutton(
+            prescriptions,
+            text="Automatic reference (first 2 Gy/fraction prescription)",
+            variable=reference_choice,
+            value="auto",
+        ).pack(anchor="w", pady=(0, 6))
         column_headers = ttk.Frame(prescriptions)
         column_headers.pack(fill="x")
+        ttk.Label(column_headers, text="Reference", width=10).pack(side="left", padx=3)
         ttk.Label(column_headers, text="Prescription name", width=49).pack(side="left", padx=3)
         ttk.Label(column_headers, text="D (Gy)", width=14).pack(side="left", padx=3)
         ttk.Label(column_headers, text="n (fractions)", width=14).pack(side="left", padx=3)
@@ -3198,6 +3313,7 @@ def launch_gui(db_path=None):
         )
         sc_canvas.bind("<Configure>", lambda e: sc_canvas.itemconfigure(canvas_id, width=e.width))
         rows = []
+        next_row_id = 0
 
         def remove_row(row):
             if len(rows) <= 2:
@@ -3208,11 +3324,19 @@ def launch_gui(db_path=None):
                 )
                 return
             rows.remove(row)
+            if reference_choice.get() == row["id"]:
+                reference_choice.set("auto")
             row["frame"].destroy()
 
         def add_row(name="", D="", n=""):
+            nonlocal next_row_id
+            row_id = str(next_row_id)
+            next_row_id += 1
             frame = ttk.Frame(rows_parent)
             frame.pack(fill="x", pady=3)
+            ttk.Radiobutton(frame, variable=reference_choice, value=row_id, width=10).pack(
+                side="left", padx=3
+            )
             name_var, D_var, n_var = (
                 tk.StringVar(value=name),
                 tk.StringVar(value=str(D)),
@@ -3225,6 +3349,7 @@ def launch_gui(db_path=None):
             e_D.pack(side="left", padx=3)
             e_n.pack(side="left", padx=3)
             row = {
+                "id": row_id,
                 "frame": frame,
                 "values": (name_var, D_var, n_var),
                 "entries": (e_name, e_D, e_n),
@@ -3238,6 +3363,8 @@ def launch_gui(db_path=None):
         previous = draft.get("prescriptions", [("", "", ""), ("", "", "")])
         for label, total, fractions in previous:
             add_row(label, total, fractions)
+            if (label, total, fractions) == draft.get("reference_prescription"):
+                reference_choice.set(rows[-1]["id"])
 
         actions = ttk.Frame(body)
         actions.pack(fill="x", pady=3)
@@ -3290,6 +3417,14 @@ def launch_gui(db_path=None):
                     alpha_beta.get(),
                     saved_rows,
                     set_id=record["id"] if record else None,
+                    reference_prescription=next(
+                        (
+                            values
+                            for row, values in zip(rows, saved_rows)
+                            if row["id"] == reference_choice.get()
+                        ),
+                        None,
+                    ),
                 )
             except (ValueError, KeyError) as exc:
                 messagebox.showerror("Cannot save prescriptions set", str(exc), parent=dialog)
@@ -3431,7 +3566,7 @@ def launch_gui(db_path=None):
         dialog.grab_set()
         body = ttk.Frame(dialog, padding=16)
         body.pack(fill="both", expand=True)
-        fmt_var = tk.StringVar(value="PNG")
+        fmt_var = tk.StringVar(value=next(iter(IMAGE_FORMATS)))
         ppi_var = tk.StringVar(value="300")
         ttk.Label(body, text="Image type").grid(row=0, column=0, sticky="w", padx=(0, 16), pady=5)
         format_input = ttk.Combobox(
@@ -3445,7 +3580,7 @@ def launch_gui(db_path=None):
         ppi_input.grid(row=1, column=1, sticky="ew", pady=5)
         ttk.Label(
             body,
-            text="EPS uses vector graphics; PPI applies to raster elements.",
+            text="PDF, EPS and SVG use vector graphics; PPI applies to raster elements.",
             wraplength=370,
             foreground="#555555",
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 10))
@@ -3470,18 +3605,12 @@ def launch_gui(db_path=None):
                 ppi_input.focus_set()
                 return
             ext = IMAGE_FORMATS[fmt_var.get()]
-            filetypes = [
-                ("PNG image", "*.png"),
-                ("JPEG image", "*.jpg"),
-                ("Encapsulated PostScript", "*.eps"),
-            ]
             path = filedialog.asksaveasfilename(
                 parent=dialog,
                 title="Save optimization plot",
                 initialfile="optimization_profile" + ext,
                 defaultextension=ext,
-                filetypes=filetypes,
-                typevariable=None,
+                filetypes=[(fmt_var.get(), "*" + ext)],
             )
             if not path:
                 return
@@ -3489,7 +3618,7 @@ def launch_gui(db_path=None):
             # another or no extension. Never save JPEG bits to a .png path.
             destination = Path(path)
             if destination.suffix.lower() != ext:
-                if destination.suffix.lower() in {".png", ".jpg", ".jpeg", ".eps"}:
+                if destination.suffix.lower() in IMAGE_EXTENSIONS:
                     destination = destination.with_suffix(ext)
                 elif not destination.suffix:
                     destination = destination.with_suffix(ext)
@@ -3564,7 +3693,7 @@ def main():
     parser.add_argument(
         "--csv",
         type=str,
-        help="read schedule CSV with name,total_gy,fractions; optional prescriptions_set,alpha_beta",
+        help="read schedule CSV with name,total_gy,fractions; optional prescriptions_set,alpha_beta,is_reference",
     )
     parser.add_argument(
         "--set", dest="set_name", type=str, help="batch-optimize a saved prescriptions set by name"
@@ -3599,10 +3728,12 @@ def main():
         if record is None:
             parser.error(f"No saved prescriptions set called {a.set_name!r} in the database.")
         data = record["prescriptions"]
+        reference_record = record
         ab = record["alpha_beta"] if a.ab is None else a.ab
     else:
         if a.csv:
             imported = read_prescriptions_set_csv(a.csv)
+            reference_record = imported
             data = imported["prescriptions"]
             ab = (
                 (imported["alpha_beta"] if imported["alpha_beta"] is not None else 1.5)
@@ -3611,11 +3742,13 @@ def main():
             )
         else:
             data = PROSTATE_PRESCRIPTIONS
+            reference_record = DEFAULT_SETS[PROSTATE_SET_NAME]
             ab = PROSTATE_ALPHA_BETA if a.ab is None else a.ab
     result = analyze(
         ab, a.dq_start, a.dq_end, a.dq_step, data, method=a.method, bound_pct=a.bound_pct
     )
     result["plot_settings"] = normalized_plot_settings({"title": a.plot_title or ""})
+    result["reference_prescription"] = reference_schedule(reference_record)
     export(result, a.out)
     i = result["idx"]
     print("Symbolic formula:", EQD2_EXPR)
