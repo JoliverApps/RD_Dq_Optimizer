@@ -744,7 +744,11 @@ def check_gui(app, db_path, result):
                     w for w in children(editor)
                     if isinstance(w, tk.Entry) and w.grid_info().get("column") == 4
                 ]
-                assert control_entries[-1].get() == ""
+                assert [entry.get() for entry in control_entries] == [
+                    "" if name not in app.PROSTATE_LOCAL_CONTROL_PCT
+                    else str(app.PROSTATE_LOCAL_CONTROL_PCT[name])
+                    for name, _, _ in app.PROSTATE_PRESCRIPTIONS
+                ]
                 root.setvar(control_entries[-1].cget("textvariable"), "53.25")
                 radios[-1].invoke()
                 button("Save prescriptions set", editor).invoke()
