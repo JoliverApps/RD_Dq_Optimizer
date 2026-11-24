@@ -1,8 +1,8 @@
 # RD EQD2 Optimizer
 
-RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). It evaluates standard shoulders, the single-hit linear law, and inverted shoulders across the selected q interval.
+RD EQD2 Optimizer is a Python desktop app for comparing fractionation schedules on the Resilience–Depletion (RD) scale. It estimates the shoulder descriptor Dq by minimizing the dispersion of equivalent doses in 2 Gy fractions (EQD2) across selected prescriptions. It also calculates BED, compares RD and LQ results, and plots observed local tumor control against RD EQD2.
 
-The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing ten prescriptions at α/β = 1.5 Gy is available on first launch.
+The first launch opens a prostate preset with ten prescriptions at α/β = 1.5 Gy. For the model, the calibration procedure, and the outcome analysis, see the [mathematical reference](MATHEMATICS.md).
 
 ## Installation
 
@@ -17,33 +17,35 @@ Download the package for your operating system from the [latest GitHub release](
 | macOS Intel | [App archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-macOS-x86_64.zip) | Extract the archive and open `RD_EQD2_Optimizer.app`. |
 | Linux x64 | [Executable archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-Linux-x86_64.tar.gz) | Extract the archive and run `./RD_EQD2_Optimizer` in a graphical session. |
 
-The Linux build targets Ubuntu 22.04 and compatible desktop distributions. The public Windows executable has no publisher signature, and the macOS app has no Developer ID notarization. Local security policy can restrict either download.
+The Linux build targets Ubuntu 22.04 and compatible desktop distributions. The Windows executable is unsigned and the macOS downloads are unnotarized. The release includes [SHA-256 checksums](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/SHA256SUMS.txt) for all four packages.
 
 ### Python application
 
-Install Python 3.11 or 3.12 with pip and Tcl/Tk. Clone or download the repository, open a terminal in its folder, and run:
+Install Python 3.11 or 3.12 with pip and Tcl/Tk. Clone or download the repository and run the following from its root.
 
-```text
+```sh
 python -m pip install .
 rd-eqd2-optimizer
 ```
 
-If you downloaded the standalone `rd_eqd2_optimizer.py` file without the repository, install its dependencies and launch it with:
+If you downloaded the standalone `rd_eqd2_optimizer.py` file, install the dependencies and run it directly.
 
-```text
+```sh
 python -m pip install numpy==2.2.6 matplotlib==3.10.3 scipy==1.17.0 sympy==1.14.0
 python rd_eqd2_optimizer.py
 ```
 
 ## Run an optimization
 
-1. Select the prescriptions sets to analyze.
-2. Open a selected set's tab in **Prescriptions in the viewed set**. Check the **Optimize** boxes for the prescriptions to include. Each selected set needs at least two prescriptions.
-3. Enter **α/β (Gy)** for each set. Click **Save α/β** to store the value for future sessions.
-4. Set **q start**, **q end**, and **q step**, then choose a minimization criterion.
-5. Click **Run optimization**.
+1. Select **Prostate — 10 prescriptions**, create a set, or import a CSV.
+2. In **Prescriptions in the viewed set**, check **Optimize** for at least two prescriptions per selected set.
+3. Enter **α/β (Gy)** for each set. Use **Save α/β** to store the value for future sessions.
+4. Set the q search interval and step, and choose **SSE**, **SD**, or **Range**.
+5. Click **Run optimization**, then **Analysis…** to inspect the selected set.
 
-Each selected set has its own tab, prescription choices, and α/β entry. Switching tabs preserves these choices. Each set is optimized independently. Prescription checkboxes control the current analysis; they do not delete saved prescriptions.
+Each set is optimized independently. Switching tabs preserves the current prescription selections and α/β entries. The **Optimize** checkboxes control which saved rows take part in the current fit.
+
+With all ten built-in prostate prescriptions, the default search and SSE criterion give Dq ≈ 3.4833 Gy, mean EQD2 ≈ 75.5906 Gy, and sample SD ≈ 2.9625 Gy. The [sample CSV](samples/prostate.csv) contains the same prescription doses and fraction counts.
 
 ### Parameters and search interval
 
@@ -52,14 +54,12 @@ Enter a positive finite α/β value for q ≥ 0. The q < 0 branch uses the negat
 | Candidate q | RD response | α/β of the response |
 | --- | --- | --- |
 | q > 0 | Standard shoulder | Positive |
-| q = 0 | Single-hit linear law | Undefined; EQD2 = D |
+| q = 0 | Single-hit linear law | Undefined |
 | q < 0 | Inverted shoulder | Negative |
 
-The default interval is −50 to +50 Gy with a step of 0.001 Gy. The optimizer evaluates the full selected interval. Zero is included once when the interval spans zero; at zero, BED and EQD2 equal the physical dose.
+The default interval is −50 to +50 Gy with a step of 0.001 Gy. The grid includes zero once when the interval spans it. At q = 0, BED and EQD2 equal the total physical dose.
 
 Use a smaller step for a finer grid. If the application reports too many grid points, increase the step or narrow the interval.
-
-See [Mathematical model and calculations](MATHEMATICS.md) for the signed reconstruction, BED and EQD2 equations, numerical evaluation, and optimization definitions.
 
 ### Minimization criterion
 
@@ -69,34 +69,35 @@ See [Mathematical model and calculations](MATHEMATICS.md) for the signed reconst
 | SD | Sample standard deviation of EQD2 |
 | Range | Difference between the highest and lowest EQD2 |
 
-**Near-optimal bounds (%)** defines a tolerance above the minimum. SSE and SD optimization use the sample SD for these bounds; range optimization uses the EQD2 range. The default tolerance is 5%.
+**Near-optimal bounds (%)** defines a tolerance above the minimum. The bounds use sample SD for SSE and SD fits and EQD2 range for range fits. The default tolerance is 5%.
 
 ## Read the results
 
-The results table reports Dq, the selected α/β reference, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
+The results table reports Dq, the signed α/β for the fitted branch, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
 
-A minimum marked **BOUNDARY** lies at an endpoint of the search interval. A wider interval may help locate an interior minimum. **Outside search** means that the selected interval does not contain both profile-bound crossings.
+A minimum marked **BOUNDARY** lies at a search endpoint. **Outside search** indicates that at least one profile-bound crossing lies beyond the selected interval.
 
-Click **Analysis…** for:
+**Analysis…** offers five tabs for the selected optimized set.
 
-- A scatter plot of EQD2 against dose per fraction.
-- Per-prescription RD BED and EQD2, with LQ comparisons.
-- Summary statistics, fitted trends, and RD parameters r and s.
-- Leave-one-out and α/β sensitivity analyses.
+| Tab | Contents |
+| --- | --- |
+| **Dispersion plot** | RD and optional LQ EQD2 against dose per fraction, with a reference line and summary statistics |
+| **Clinical evaluation** | RD EQD2 against observed local tumor control, with summary statistics and a bounded beta fit when available |
+| **Prescription values** | Per-prescription RD and LQ BED and EQD2, observed local control, and dose differences |
+| **Summary & trends** | RD parameters, descriptive statistics, trend coefficients, and profile bounds |
+| **Robustness** | Leave-one-out recalibration and α/β sensitivity |
 
-At Dq = 0, the linear response gives BED = EQD2 = D. The sensitization rate s is displayed as **N/A**.
-
-For α/β = −2 Gy, LQ EQD2 is unavailable because its reference denominator is zero. RD results remain available. For other negative α/β values, LQ extrapolations can produce negative equivalent doses.
+At Dq = 0, the sensitization rate s is displayed as **N/A**. At α/β = −2 Gy, the LQ EQD2 reference denominator is zero and the comparison is displayed as **N/A**. With other negative α/β values, LQ extrapolations can produce negative equivalent doses.
 
 ### Clinical evaluation
 
-Enter an observed **Local tumor control (%)** for each prescription with available outcome data. Leave unavailable outcomes blank. After optimization, open **Analysis… → Clinical evaluation**. Each selected prescription with an outcome contributes one equally weighted point at its fitted RD EQD2. The summary and plot show means, observed minimum–maximum ranges, and an unweighted linear trend with R² when defined. The enclosing area on the RD scale is also shown relative to the LQ area when the comparison is defined.
+1. In **New prescriptions set** or **Edit prescriptions set**, enter **Local tumor control (%)** on each row with an observed outcome. A blank cell represents missing data. A value of 0 represents observed 0% local control. For CSV import, use `local_control_pct`.
+2. Run the optimization with the desired prescriptions. The Dq fit uses the total doses and fraction counts of all checked rows.
+3. Open **Analysis… → Clinical evaluation**. Each checked row with an outcome contributes one equally weighted point using its RD EQD2 at the fitted Dq.
 
-The plot shades a subgroup when it contains at least three observations and a strict majority of the points. Along one axis, each gap to its neighboring points must exceed the subgroup width. Along the other axis, the subgroup must span at most 75% of the full observed range. If several subgroups qualify, the app uses the largest and then the one with the smallest relative enclosing area.
+The plot and summary show means, observed minimum–maximum ranges, a linear trend, and R² where defined. A shaded rectangle marks a compact majority subgroup when the [cluster rule](MATHEMATICS.md#clinical-evaluation) is met. The summary compares the enclosing areas on the RD and LQ scales for the same observations when the ratio is defined.
 
-The beta regression fits a logit mean against EQD2 and a common precision. Its optional 95% band shows the fitted conditional 2.5th and 97.5th percentiles. A dose-dependent fit requires at least four outcomes and an intercept-only fit at constant EQD2 requires at least three. When any outcome is 0% or 100%, the beta likelihood uses the transformation `(y × (N − 1) + 0.5) / N` on all proportions. The scatter and basic analysis use the original observations. [Beta regression](https://doi.org/10.1080/0266476042000214501) · [Endpoint transformation](https://doi.org/10.1037/1082-989X.11.1.54)
-
-Use **Export clinical evaluation plot…** to save the figure.
+Use **Beta mean** to show the fitted mean curve and **95% beta interval** to overlay the central conditional outcome interval. The dose-dependent fit requires at least four observations with varying EQD2 and varying local control. At constant EQD2, three or more varying outcomes can support an intercept-only fit. Use **Export clinical evaluation plot…** to save the figure.
 
 ### Robustness analysis
 
@@ -104,15 +105,13 @@ Open the **Robustness** tab in the analysis window and click **Run robustness**.
 
 To assess α/β sensitivity, enter comma-separated positive reference values. Each reference value is used for q ≥ 0 and its negative is used for q < 0.
 
-## Manage prescriptions sets
+## Manage prescription sets
 
 Use **New prescriptions set**, **Edit prescriptions set**, and **Delete prescriptions set** to manage saved data. Each prescription requires a name, a positive total dose in Gy, and a positive integer number of fractions.
 
-The first prescription with 2 Gy per fraction is used automatically as the reference. In the set editor, select a prescription's **Reference** button to override this choice, or select **Automatic reference** to restore it. The saved choice follows that row when its name, dose, or fraction count is edited. The main prescription list marks the reference, and the analysis window fills **Reference EQD2 (Gy)** with its RD EQD2 at the fitted Dq. The reference remains available when unchecked for optimization. Sets without a 2 Gy/fraction prescription or an explicit choice leave the reference blank; it can also be entered directly in the analysis window.
+The first prescription with 2 Gy per fraction supplies the automatic reference for the dispersion plot. In the prostate preset, this is 78 Gy in 39 fractions. In the set editor, select a row's **Reference** button to override the choice or **Automatic reference** to restore it. The analysis window fills **Reference EQD2 (Gy)** with the reference row's RD EQD2 at the fitted Dq, even if that row is unchecked for optimization. You can also enter a plot reference directly in the analysis window. All EQD2 calculations use 2 Gy as the reference fraction size.
 
-Use **Export prescriptions set…** to save the viewed set's checked prescriptions and current α/β as CSV. Use **Import prescriptions set…** to load a CSV file.
-
-The CSV columns are:
+Use **Export prescriptions set…** to save the checked prescriptions in the viewed set as a CSV with the current α/β and any entered outcomes. Keep the reference row checked to include its reference marker in the CSV. Use **Import prescriptions set…** to open a CSV in the editor and review it before saving.
 
 | Column | Contents |
 | --- | --- |
@@ -124,52 +123,44 @@ The CSV columns are:
 | `is_reference` | Optional 1 for the chosen reference row, 0 or blank otherwise; at most one row may be marked |
 | `local_control_pct` | Optional observed local tumor control percentage from 0 to 100 |
 
-The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
+The first three columns are required. A file holds one prescription set with unique prescription names. When the set name is omitted, the editor uses the filename. Start with the [prostate CSV example](samples/prostate.csv).
 
 ## Export data and plots
 
-- **Export results + graph** saves the optimization grid, optimal prescription values, and an optimization plot.
-- **Export image…** saves the optimization plot as PDF, JPG, PNG, EPS, or SVG, in that order, with a selected resolution.
-- **Plot settings…** controls titles, labels, fonts, colors, dimensions, and vertical axis limits. The horizontal axis spans q start to q end.
-- The analysis window exports tables as CSV, TSV, JSON, or LaTeX, and offers the same PDF, JPG, PNG, EPS, and SVG choices for dispersion plots. PDF, EPS, and SVG preserve vector lines and text; PPI controls raster resolution.
+| Control | Output |
+| --- | --- |
+| **Export results + graph** | `grid_results.csv`, `optimal_schedules.csv`, and `range.png` |
+| **Export image…** | The optimization profile in PDF, JPG, PNG, EPS, or SVG |
+| **Export dispersion plot…** and **Export clinical evaluation plot…** | The corresponding analysis figures in the same five formats |
+| **Export tables…** | Analysis tables in CSV, TSV, JSON, or LaTeX, with options to include robustness results and dispersion plots |
+
+Use **Plot settings…** to style the optimization profile. Image export accepts a resolution in pixels per inch. PDF, EPS, and SVG preserve vector lines and text.
 
 ## Command-line use
 
-Run the prostate set:
+Use the `rd-eqd2-optimizer` command after installing the Python project. For the standalone file, use `python rd_eqd2_optimizer.py` in its place.
 
-```text
-python rd_eqd2_optimizer.py --batch --dataset prostate --out results
+```sh
+rd-eqd2-optimizer --batch --dataset prostate --out results/prostate
+rd-eqd2-optimizer --batch --csv samples/prostate.csv --ab 1.5 --dq-start 0 --dq-end 50 --dq-step 0.01 --out results/csv
+rd-eqd2-optimizer --batch --set "Prostate — 10 prescriptions" --out results/saved
 ```
 
-Analyze a CSV file:
-
-```text
-python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab 1.5 --dq-start 0 --dq-end 50 --dq-step 0.01 --out results
-```
-
-Search across positive and negative q:
-
-```text
-python rd_eqd2_optimizer.py --batch --csv prescriptions.csv --ab 10 --dq-start=-50 --dq-end=50 --out results
-```
-
-Use `--set "Set name"` to select a saved prescriptions set. Use `--method sse`, `--method sd`, or `--method range` to choose the criterion. Use `--db` to select a prescriptions database. Run `python rd_eqd2_optimizer.py --help` for all options.
+The built-in and saved-set commands use their respective α/β values unless `--ab` overrides them. A CSV uses its `alpha_beta` value when provided and defaults to 1.5 Gy otherwise. Choose `--method sse`, `--method sd`, or `--method range` to set the objective. Batch mode writes the optimization grid, prescription values, and profile image. Use the GUI for clinical evaluation and robustness exports. Run `rd-eqd2-optimizer --help` for all options.
 
 ## Saved data
 
-On Windows, the default files are:
+The app stores its data under `%USERPROFILE%\.rd_dq_optimizer` on Windows and `~/.rd_dq_optimizer` on macOS and Linux. The Python application and desktop downloads share these paths for the same user account.
 
-| File | Location |
+| File | Contents |
 | --- | --- |
-| Prescriptions database | `%USERPROFILE%\.rd_dq_optimizer\prescriptions.sqlite3` |
-| Plot preferences | `%USERPROFILE%\.rd_dq_optimizer\plot_settings.json` |
-| Windows executable log | `%USERPROFILE%\.rd_dq_optimizer\application.log` |
+| `prescriptions.sqlite3` | Saved prescription sets, α/β values, reference choices, and local control |
+| `plot_settings.json` | Saved optimization plot preferences |
+| `application.log` | Output from windowed builds without a console |
 
-On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and packaged builds use the same default database. Back up the database file to retain saved sets.
+Close the app before copying `prescriptions.sqlite3` as a backup. Use `--db` or the `RD_DQ_DB_PATH` environment variable to select a different database.
 
 The original eight-prescription prostate set is updated in place if its prescription rows match the original preset. Saved α/β and reference choices carry forward. If you edited the rows under the original set name, the ten-prescription preset appears alongside your saved set.
-
-A different database can be selected with `--db` or the `RD_DQ_DB_PATH` environment variable.
 
 ## Build a desktop package
 
@@ -179,9 +170,9 @@ Run the build on the target platform with 64-bit Python 3.11 or 3.12, pip, venv,
 python tools/build.py Build Release
 ```
 
-The build installs pinned dependencies in `.venv-build`, verifies the Python source, creates the native app with PyInstaller, and runs the same checks against the packaged app. Release output is in `dist/Release`. On headless Linux, run the build under `xvfb-run -a`. On Windows, `Build.cmd Build Release` also works. Set `RD_PYTHON` to the full path of `python.exe` if the Windows launcher cannot find your interpreter.
+The build installs pinned dependencies in `.venv-build`, runs source and packaged-app checks, and writes the app and build manifest to `dist/Release`. On headless Linux, use `xvfb-run -a python tools/build.py Build Release`. On Windows, `Build.cmd Build Release` also works. Set `RD_PYTHON` to the full path of `python.exe` if the Windows launcher cannot find your interpreter.
 
-GitHub Actions builds and tests the platform packages on pull requests. Updating the project version in `pyproject.toml` on `main` builds the packages and publishes a GitHub release with SHA-256 checksums once the platform tests pass.
+The [GitHub Actions workflow](.github/workflows/desktop-release.yml) builds and tests Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 on pull requests to `main`. A change to the package version in `pyproject.toml` on `main` triggers a release build. Once the platform tests pass, the workflow publishes the version tag, four desktop downloads, and their checksums if that version has no published release.
 
 ### Sign local Windows Debug builds
 
@@ -213,3 +204,5 @@ To stop signing Debug builds, delete the local `debug-signing.json` settings fil
 | Build exits with code −1610612730 (0xA0000006) | Python Install Manager could not launch the requested runtime with automatic installation disabled. Run `py install 3.12`, then build again. |
 | Too many grid points | Increase q step or narrow the interval. |
 | A Windows executable reports a startup error | Check `application.log` in the data folder. |
+
+RD EQD2 Optimizer is distributed under the [MIT License](LICENSE).

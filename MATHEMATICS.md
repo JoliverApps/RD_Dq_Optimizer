@@ -1,6 +1,6 @@
 # Mathematical model and calculations
 
-RD EQD2 Optimizer fits the Resilience–Depletion shoulder displacement Dq by comparing the equivalent doses of selected radiotherapy prescriptions. The running parameter is q; its value at the selected minimum is reported as Dq.
+RD EQD2 Optimizer fits the Resilience–Depletion (RD) shoulder displacement Dq by comparing the equivalent doses of selected radiotherapy prescriptions. The running parameter is q, and its value at the selected minimum is reported as Dq. The survival model and BED formalism are described in J. Manuel Oliveira, *Resilience–depletion hypothesis: Unifying BED from conventional to ablative radiotherapy*, *Medical Physics* 53(5), e70490 (2026). [Published article](https://doi.org/10.1002/mp.70490)
 
 ## RD survival law
 
@@ -189,6 +189,36 @@ $$
 
 At q = 0, this comparison uses the entered reference value, while the RD result is the linear-law limit. LQ comparison values do not enter the RD optimization objective. For negative a, LQ extrapolations can become negative; at a = −d₀, LQ EQD2 is undefined and is displayed as N/A.
 
+## Clinical evaluation
+
+The clinical analysis uses the selected prescriptions with a recorded local tumor control value. Each provides one paired observation $(E_i,C_i)$, with $E_i$ the RD EQD2 in Gy evaluated at the already fitted Dq and $C_i$ the observed local tumor control percentage. The calibration objective uses the selected doses and fraction counts. The outcome analysis uses those fitted EQD2 values and gives each reported percentage equal weight.
+
+The basic analysis reports the arithmetic mean and observed minimum and maximum for each variable. It fits a least-squares line for control as a function of EQD2 when EQD2 varies. R² is reported when the observed control values also vary.
+
+### Enclosing rectangles and clusters
+
+The enclosing rectangle has area $\Delta E\,\Delta C$, with $\Delta E$ the EQD2 range in Gy and $\Delta C$ the local control range in percentage points. The app reports RD enclosing area as a percentage of LQ enclosing area for the same prescriptions. The control range is common to both scales, so the area ratio reduces to $100\,\Delta E_{\mathrm{RD}}/\Delta E_{\mathrm{LQ}}$. It is reported when the LQ values are finite and both the LQ EQD2 and control ranges are positive.
+
+On either axis, a candidate subgroup consists of consecutive observations in sorted order. It must contain at least three observations and a strict majority of all observed points. Each gap to an adjacent point outside the subgroup must exceed the subgroup's span on that axis. On the other axis, the subgroup span must be at most 75% of the full observed range. At least one outside point is required.
+
+Among eligible subgroups, the app chooses the one with the most observations, then the smallest relative enclosing area, then the smallest sum of relative widths. Each relative width is the subgroup span divided by the full range on that axis. An axis with zero full range contributes zero relative width. The shaded rectangle spans the chosen subgroup's observed minima and maxima.
+
+### Beta regression
+
+With observed control expressed as a proportion, the model uses a beta distribution with conditional mean $\mu_i$ and common precision $\phi>0$.
+
+$$
+Y_i\mid E_i \sim \operatorname{Beta}\!\left(\mu_i\phi,(1-\mu_i)\phi\right),
+\qquad
+\operatorname{logit}(\mu_i)=b_0+b_1(E_i-\bar E).
+$$
+
+Here $\bar E$ is the mean EQD2 of the observed prescriptions and $b_1$ is the logit slope per Gy. The parameters are estimated by maximum likelihood. A dose-dependent fit uses at least four observed prescriptions with varying EQD2 and local control. An intercept-only fit at constant EQD2 uses at least three varying outcomes. [Beta regression model](https://doi.org/10.1080/0266476042000214501)
+
+When any observed proportion is exactly 0 or 1, the beta likelihood uses $[y_i(N-1)+0.5]/N$ for all $N$ observations. The scatter and basic analysis retain the original percentages. [Endpoint transformation](https://doi.org/10.1037/1082-989X.11.1.54)
+
+The curve shows $100\mu_i$ and the optional band shows the fitted beta distribution's 2.5th and 97.5th percentiles, expressed as percentages. The band describes conditional outcome variability at the fitted parameters. The app also reports the fitted mean and central interval at $\bar E$.
+
 ## Implementation reference
 
 The equations are implemented in [rd_eqd2_optimizer.py](rd_eqd2_optimizer.py).
@@ -203,3 +233,6 @@ The equations are implemented in [rd_eqd2_optimizer.py](rd_eqd2_optimizer.py).
 | `fraction_bed` | BED per fraction |
 | `EQD2_FN`, `evaluate` | Prescription EQD2 values |
 | `analyze` | Objective search, statistics, and profile bounds |
+| `clinical_evaluation` | EQD2 and observed local control summary |
+| `_clinical_cluster` | Enclosing rectangle selection |
+| `_fit_control_beta`, `_beta_control_prediction` | Conditional beta fit, mean, and interval |
