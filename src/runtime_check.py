@@ -429,6 +429,7 @@ def check_prostate_preset_upgrade(app, folder):
         "prescriptions": app.PROSTATE_PRESCRIPTIONS,
         "alpha_beta": 1.8,
         "reference_prescription": previous_rows[-1],
+        "local_control_pct": {},
     }
     assert len(app.PrescriptionStore(path, app.DEFAULT_SETS).list_sets()) == 1
 
@@ -445,6 +446,73 @@ def check_prostate_preset_upgrade(app, folder):
     previous = app.PrescriptionStore(path, previous_defaults)
     previous.delete_set(previous.find_set(previous_name)["id"])
     assert app.PrescriptionStore(path, app.DEFAULT_SETS).list_sets() == []
+
+
+def check_clinical_evaluation(app, folder):
+    import numpy as np
+    from matplotlib.figure import Figure
+
+    path = folder / "clinical.sqlite3"
+    # Synthetic outcomes and schedules with a compact four-point majority.
+    store = app.PrescriptionStore(path)
+    grouped_rows = [(f"Example {i}", 2 * n, n) for i, n in enumerate((18, 20, 29, 30, 31, 32))]
+    grouped_controls = dict(zip((row[0] for row in grouped_rows), (38, 79, 74, 81, 76, 85)))
+    group_id = store.save_set("Grouped examples", 1.5, grouped_rows, local_control_pct=grouped_controls)
+    record = store.get_set(group_id)
+    fit = app.analyze_selected([record], 0.01, 50, 0.01)["sets"][0]
+    detail = app.build_analysis(fit)
+    clinical = detail["clinical"]
+    np.testing.assert_allclose(clinical["mean"], [320 / 6, 433 / 6])
+    assert 0 < clinical["linear"]["r_squared"] < 1
+    assert len(clinical["observations"]) == 6
+    cluster = clinical["cluster"]
+    np.testing.assert_array_equal(np.sort(cluster["indices"]), [2, 3, 4, 5])
+    np.testing.assert_allclose(cluster["maximum"] - cluster["minimum"], [6, 11])
+    np.testing.assert_allclose(cluster["area_percent"], 100)
+    mean, lower, upper = app._beta_control_prediction(clinical["beta"], clinical["mean"][0])
+    assert 0 < lower < mean < upper < 100
+
+    selection = app.PrescriptionsSelection()
+    selection.sync([record])
+    selection.set_included(record, [0], False)
+    subset = selection.configured_set(record)
+    result = app.analyze_selected([subset], 0.01, 50, 0.01)["sets"][0]
+    assert len(app.build_analysis(result)["clinical"]["observations"]) == 5
+
+    rows = [("A", 52, 26), ("B", 60, 30), ("C", 70, 35), ("D", 85, 42), ("E", 78, 39)]
+    observations = {"A": 0, "B": 25, "C": 75, "D": 100}
+    set_id = store.save_set("Observed", 1.5, rows, local_control_pct=observations)
+    store.update_alpha_beta(set_id, 2)
+    store.save_set("Observed", 2, rows, set_id=set_id)
+    record = store.get_set(set_id)
+    assert record["local_control_pct"] == observations
+    csv_path = app.export_prescriptions_set(record, folder / "clinical-observations.csv")
+    assert app.read_prescriptions_set_csv(csv_path)["local_control_pct"] == observations
+    for invalid in (-0.01, 100.01, "NaN", "inf", "bad"):
+        try:
+            store.save_set("Observed", 2, rows, set_id=set_id, local_control_pct={"A": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("Accepted invalid local tumor control")
+    assert store.get_set(set_id) == record
+    result = app.analyze_selected([record], 0.01, 50, 0.01)["sets"][0]
+    clinical = app.build_analysis(result)["clinical"]
+    np.testing.assert_array_equal(clinical["points"][:, 1], [0, 25, 75, 100])
+    assert clinical["cluster"] is None
+    assert clinical["beta"]["adjusted_endpoints"]
+    mean, low, high = app._beta_control_prediction(clinical["beta"], clinical["points"][:, 0])
+    assert np.all((0 <= low) & (low <= mean) & (mean <= high) & (high <= 100))
+    fig = Figure()
+    app.draw_clinical_plot(fig, clinical)
+    assert len(fig.axes[0].patches) == 0
+    png = folder / "clinical.png"
+    app.export_clinical_plot(detail["clinical"], png, ppi=72, show_interval=True)
+    assert png.read_bytes().startswith(b"\x89PNG")
+    store.save_set("Observed", 2, rows, set_id=set_id, local_control_pct={})
+    assert store.get_set(set_id)["local_control_pct"] == {}
+    result = app.analyze_selected([store.get_set(set_id)], 0.01, 50, 0.01)["sets"][0]
+    assert app.build_analysis(result)["clinical"] is None
 
 
 def check_gui(app, db_path, result):
@@ -600,6 +668,7 @@ def check_gui(app, db_path, result):
                 imported = app.read_prescriptions_set_csv(export_path)
                 assert len(imported["prescriptions"]) == original_count - 1
                 assert imported["alpha_beta"] == 2.2
+                assert imported["local_control_pct"] == {}
                 optimize.invoke()
                 details = app.open_analysis_window(root, result)
                 assert details is not None and details.winfo_exists(), (
@@ -635,15 +704,34 @@ def check_gui(app, db_path, result):
                 editor = dialog("Edit prescriptions set")
                 radios = [w for w in children(editor) if isinstance(w, ttk.Radiobutton)]
                 assert root.getvar(radios[0].cget("variable")) == "auto"
+                control_entries = [
+                    w for w in children(editor)
+                    if isinstance(w, tk.Entry) and w.grid_info().get("column") == 4
+                ]
+                assert control_entries[-1].get() == ""
+                root.setvar(control_entries[-1].cget("textvariable"), "53.25")
                 radios[-1].invoke()
                 button("Save prescriptions set", editor).invoke()
                 saved = app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)
                 assert saved["reference_prescription"] == app.PROSTATE_PRESCRIPTIONS[-1]
+                assert saved["local_control_pct"][app.PROSTATE_PRESCRIPTIONS[-1][0]] == 53.25
                 _, prescriptions, _ = view(app.PROSTATE_SET_NAME)
                 assert prescriptions.set(str(original_count - 1), "reference") == "Yes"
                 optimize.invoke()
                 button("Analysis…").invoke()
                 analysis = dialog("RD EQD2 — Detailed analysis")
+                analysis_tabs = next(w for w in children(analysis) if isinstance(w, ttk.Notebook))
+                clinical_tab = next(
+                    page for page in analysis_tabs.tabs()
+                    if analysis_tabs.tab(page, "text") == "Clinical evaluation"
+                )
+                analysis_tabs.select(clinical_tab)
+                root.update_idletasks()
+                assert any(
+                    "Mean local control" in str(root.getvar(w.cget("textvariable")))
+                    for w in children(root.nametowidget(clinical_tab))
+                    if isinstance(w, ttk.Label) and w.cget("textvariable")
+                )
                 reference_entry = next(
                     w
                     for w in children(analysis)
@@ -659,6 +747,7 @@ def check_gui(app, db_path, result):
                 )["reference"]
                 assert abs(float(reference_entry.get()) - expected) < 1e-8
                 for owner, trigger, title in (
+                    (analysis, "Export clinical evaluation plot…", "Export clinical evaluation plot"),
                     (analysis, "Export dispersion plot…", "Export dispersion plot"),
                     (root, "Export image…", "Export plot image"),
                 ):
@@ -686,6 +775,18 @@ def check_gui(app, db_path, result):
                     if isinstance(w, ttk.Entry) and w.cget("width") == 9
                 )
                 assert float(reference_entry.get()) == 78
+                analysis.destroy()
+                button("New prescriptions set").invoke()
+                editor = dialog("New prescriptions set")
+                entries = [w for w in children(editor) if isinstance(w, tk.Entry)]
+                values = ["New observed set", "1.5", "A", "50", "25", "0", "B", "27", "3", "100"]
+                assert len(entries) == len(values)
+                for entry, value in zip(entries, values):
+                    root.setvar(entry.cget("textvariable"), value)
+                button("Save prescriptions set", editor).invoke()
+                assert app.PrescriptionStore(db_path).find_set("New observed set")[
+                    "local_control_pct"
+                ] == {"A": 0, "B": 100}
                 if failures:
                     raise RuntimeError("; ".join(failures))
                 completed.append(True)
@@ -735,6 +836,7 @@ def run_checks(report_path, include_gui=True):
                 sample = app.read_prescriptions_set_csv(root / "samples" / "prostate.csv")
                 assert sample["prescriptions"] == app.PROSTATE_PRESCRIPTIONS
                 assert sample["alpha_beta"] == app.PROSTATE_ALPHA_BETA
+                assert sample["local_control_pct"] == {}
                 assert app.reference_schedule(sample) == ("Shared conventional reference", 78, 39)
                 passed("Sample CSV matches the built-in prostate set")
             result = app.analyze(1.5, 0.01, 50.0, 0.01, app.PROSTATE_PRESCRIPTIONS)
@@ -807,6 +909,8 @@ def run_checks(report_path, include_gui=True):
             passed("Prostate-only defaults, idempotent initialization, and saved-set preservation")
             check_prostate_preset_upgrade(app, folder)
             passed("Existing prostate preset upgrade and preservation of customized or deleted sets")
+            check_clinical_evaluation(app, folder)
+            passed("Observed local control storage, CSV round trip, clustering, beta fit and plot")
             custom = store.save_set(
                 "Verification — custom", 1.5, [("Reference", 78, 39), ("SBRT", 38, 4)]
             )

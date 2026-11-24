@@ -22,7 +22,7 @@ python rd_eqd2_optimizer.py
 If you downloaded the standalone `rd_eqd2_optimizer.py` file without the repository, install its dependencies and launch it with:
 
 ```text
-python -m pip install numpy==2.2.6 matplotlib==3.10.3 sympy==1.14.0
+python -m pip install numpy==2.2.6 matplotlib==3.10.3 scipy==1.17.0 sympy==1.14.0
 python rd_eqd2_optimizer.py
 ```
 
@@ -79,6 +79,16 @@ At Dq = 0, the linear response gives BED = EQD2 = D. The sensitization rate s is
 
 For α/β = −2 Gy, LQ EQD2 is unavailable because its reference denominator is zero. RD results remain available. For other negative α/β values, LQ extrapolations can produce negative equivalent doses.
 
+### Clinical evaluation
+
+Enter an observed **Local tumor control (%)** for each prescription with available outcome data. Leave unavailable outcomes blank. After optimization, open **Analysis… → Clinical evaluation**. Each selected prescription with an outcome contributes one equally weighted point at its fitted RD EQD2. The summary and plot show means, observed minimum–maximum ranges, and an unweighted linear trend with R² when defined. The enclosing area on the RD scale is also shown relative to the LQ area when the comparison is defined.
+
+The plot shades a subgroup when it contains at least three observations and a strict majority of the points. Along one axis, each gap to its neighboring points must exceed the subgroup width. Along the other axis, the subgroup must span at most 75% of the full observed range. If several subgroups qualify, the app uses the largest and then the one with the smallest relative enclosing area.
+
+The beta regression fits a logit mean against EQD2 and a common precision. Its optional 95% band shows the fitted conditional 2.5th and 97.5th percentiles. A dose-dependent fit requires at least four outcomes and an intercept-only fit at constant EQD2 requires at least three. When any outcome is 0% or 100%, the beta likelihood uses the transformation `(y × (N − 1) + 0.5) / N` on all proportions. The scatter and basic analysis use the original observations. [Beta regression](https://doi.org/10.1080/0266476042000214501) · [Endpoint transformation](https://doi.org/10.1037/1082-989X.11.1.54)
+
+Use **Export clinical evaluation plot…** to save the figure.
+
 ### Robustness analysis
 
 Open the **Robustness** tab in the analysis window and click **Run robustness**. Leave-one-out analysis requires at least three prescriptions.
@@ -103,6 +113,7 @@ The CSV columns are:
 | `prescriptions_set` | Set name |
 | `alpha_beta` | α/β input for q ≥ 0, in Gy |
 | `is_reference` | Optional 1 for the chosen reference row, 0 or blank otherwise; at most one row may be marked |
+| `local_control_pct` | Optional observed local tumor control percentage from 0 to 100 |
 
 The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
 
@@ -209,7 +220,7 @@ To stop signing Debug builds, delete the local `debug-signing.json` settings fil
 
 | Problem | Action |
 | --- | --- |
-| Missing NumPy, Matplotlib, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
+| Missing NumPy, Matplotlib, SciPy, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
 | Tkinter is unavailable | Install Tcl/Tk support for the selected Python interpreter. |
 | Build exits with code −1610612730 (0xA0000006) | Python Install Manager could not launch the requested runtime with automatic installation disabled. Run `py install 3.12`, then build again. |
 | Too many grid points | Increase q step or narrow the interval. |

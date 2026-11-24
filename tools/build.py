@@ -19,7 +19,7 @@ CHECK_CODE = (
     "import sys, struct; "
     'assert sys.version_info[:2] in [(3,11),(3,12)], "Use Python 3.11 or 3.12"; '
     'assert struct.calcsize("P")==8, "Use 64-bit Python"; '
-    "import tkinter, _tkinter, sqlite3, numpy, matplotlib, sympy, PyInstaller"
+    "import tkinter, _tkinter, sqlite3, numpy, matplotlib, scipy, sympy, PyInstaller"
 )
 
 

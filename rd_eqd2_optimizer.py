@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """RD EQD2 Optimizer: estimate Dq from radiotherapy prescriptions.
 
-Run this file to open the GUI. Dependencies: numpy, matplotlib, sympy, and Tkinter.
+Run this file to open the GUI. Dependencies: numpy, matplotlib, scipy, sympy, and Tkinter.
 The prostate set contains ten prescriptions at alpha/beta=1.5 Gy.
-CSV import: name,total_gy,fractions; optional prescriptions_set,alpha_beta,is_reference columns.
+CSV import: name,total_gy,fractions; optional prescriptions_set,alpha_beta,is_reference,local_control_pct columns.
 Select individual prescriptions and edit alpha/beta directly on the main page.
 Batch example: python rd_eqd2_optimizer.py --batch --dataset prostate --out results
 """
@@ -154,6 +154,11 @@ class PrescriptionStore:
                     "ALTER TABLE prescriptions ADD COLUMN is_reference INTEGER NOT NULL "
                     "DEFAULT 0 CHECK (is_reference IN (0,1))"
                 )
+            if "local_control_pct" not in columns:
+                con.execute(
+                    "ALTER TABLE prescriptions ADD COLUMN local_control_pct REAL "
+                    "CHECK (local_control_pct BETWEEN 0 AND 100)"
+                )
             con.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_reference_per_set "
                 "ON prescriptions(tumor_id) WHERE is_reference=1"
@@ -179,9 +184,11 @@ class PrescriptionStore:
             (name, validated_alpha_beta(dataset["alpha_beta"])),
         )
         reference = dataset.get("reference_prescription")
+        controls = dataset.get("local_control_pct", {})
         con.executemany(
-            "INSERT INTO prescriptions (tumor_id,name,total_gy,fractions,position,is_reference) "
-            "VALUES (?,?,?,?,?,?)",
+            "INSERT INTO prescriptions "
+            "(tumor_id,name,total_gy,fractions,position,is_reference,local_control_pct) "
+            "VALUES (?,?,?,?,?,?,?)",
             [
                 (
                     cursor.lastrowid,
@@ -190,6 +197,7 @@ class PrescriptionStore:
                     int(fractions),
                     position,
                     int((label, dose, fractions) == reference),
+                    validated_local_control(controls.get(label)),
                 )
                 for position, (label, dose, fractions) in enumerate(dataset["prescriptions"])
             ],
@@ -253,7 +261,7 @@ class PrescriptionStore:
                 raise KeyError(f"Prescriptions set {set_id} does not exist.")
             data = dict(row)
             prescriptions = con.execute(
-                "SELECT name,total_gy,fractions,is_reference FROM prescriptions "
+                "SELECT name,total_gy,fractions,is_reference,local_control_pct FROM prescriptions "
                 "WHERE tumor_id=? ORDER BY position,id",
                 (set_id,),
             ).fetchall()
@@ -268,6 +276,11 @@ class PrescriptionStore:
                 ),
                 None,
             )
+            data["local_control_pct"] = {
+                row["name"]: row["local_control_pct"]
+                for row in prescriptions
+                if row["local_control_pct"] is not None
+            }
             return data
 
     def find_set(self, name):
@@ -275,7 +288,15 @@ class PrescriptionStore:
             row = con.execute("SELECT id FROM tumors WHERE name=?", (name,)).fetchone()
         return self.get_set(row["id"]) if row else None
 
-    def save_set(self, name, alpha_beta, prescriptions, set_id=None, reference_prescription=None):
+    def save_set(
+        self,
+        name,
+        alpha_beta,
+        prescriptions,
+        set_id=None,
+        reference_prescription=None,
+        local_control_pct=None,
+    ):
         name = str(name).strip()
         if not name:
             raise ValueError("Prescriptions set name is required.")
@@ -292,6 +313,13 @@ class PrescriptionStore:
         labels = [row[0].casefold() for row in rows]
         if len(labels) != len(set(labels)):
             raise ValueError("Each prescription name must be unique within a prescriptions set.")
+        controls = {}
+        if local_control_pct is not None:
+            if not set(local_control_pct).issubset(row[0] for row in rows):
+                raise ValueError("Local tumor control must refer to a prescription in this set.")
+            controls = {
+                row: validated_local_control(local_control_pct.get(row[0])) for row in rows
+            }
         with self._connection() as con:
             try:
                 if set_id is None:
@@ -305,12 +333,22 @@ class PrescriptionStore:
                     )
                     if not cur.rowcount:
                         raise KeyError(f"Prescriptions set {set_id} does not exist.")
+                    if local_control_pct is None:
+                        controls = {
+                            (p["name"], p["total_gy"], p["fractions"]): p["local_control_pct"]
+                            for p in con.execute(
+                                "SELECT name,total_gy,fractions,local_control_pct "
+                                "FROM prescriptions WHERE tumor_id=?",
+                                (set_id,),
+                            )
+                        }
                     con.execute("DELETE FROM prescriptions WHERE tumor_id=?", (set_id,))
                 con.executemany(
-                    "INSERT INTO prescriptions(tumor_id,name,total_gy,fractions,position,is_reference) "
-                    "VALUES (?,?,?,?,?,?)",
+                    "INSERT INTO prescriptions "
+                    "(tumor_id,name,total_gy,fractions,position,is_reference,local_control_pct) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     [
-                        (set_id, *row, i, int(row == reference_prescription))
+                        (set_id, *row, i, int(row == reference_prescription), controls.get(row))
                         for i, row in enumerate(rows)
                     ],
                 )
@@ -343,6 +381,22 @@ def validated_alpha_beta(value):
     if not math.isfinite(ab) or ab <= 0:
         raise ValueError("Enter a positive finite α/β value for the q ≥ 0 branch.")
     return ab
+
+
+def validated_local_control(value):
+    """Read an optional observed percentage, keeping both 0 and 100 valid."""
+    if value is None or isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, str):
+        value = value.strip().removesuffix("%")
+    message = "Local tumor control must be a percentage from 0 to 100, or left blank."
+    try:
+        percent = float(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(message) from exc
+    if not 0 <= percent <= 100:
+        raise ValueError(message)
+    return percent
 
 
 def reference_schedule(record):
@@ -971,6 +1025,10 @@ def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0)
             bound_pct=bound_pct,
         )
         res["reference_prescription"] = reference_schedule(record)
+        controls = record.get("local_control_pct", {})
+        res["local_control_pct"] = {
+            label: controls[label] for label, _, _ in res["schedules"] if label in controls
+        }
         result_sets.append({"name": record["name"], "id": record.get("id"), "result": res})
     return {"method": method, "bound_pct": float(bound_pct), "sets": result_sets}
 
@@ -1156,6 +1214,7 @@ def read_prescriptions_set_csv(path):
     Required columns: name,total_gy,fractions (also accepts prescription,D,n).
     Optional prescriptions_set and alpha_beta columns describe one consistent set.
     An is_reference column may mark one prescription as the reference.
+    The optional local_control_pct column holds observed percentages.
     The tumor header is also accepted. Plain CSVs use the filename as set name
     and leave alpha/beta blank for the import editor. UTF-8 BOM and comma/semicolon/tab delimiters are accepted.
     """
@@ -1189,13 +1248,18 @@ def read_prescriptions_set_csv(path):
         "ab": "alpha_beta",
         "is_reference": "is_reference",
         "reference": "is_reference",
+        "local_control_pct": "local_control_pct",
+        "local_tumor_control_pct": "local_control_pct",
+        "local_tumor_control": "local_control_pct",
     }
 
     def column_name(value):
         value = str(value).strip().casefold().replace("α", "alpha").replace("β", "beta")
+        value = value.replace("%", "pct")
         return aliases.get(re.sub(r"[\s/()\-]+", "_", value).strip("_"), value)
 
     schedules, set_names, alpha_betas, references = [], [], [], []
+    controls = {}
     try:
         with open(path, encoding="utf-8-sig", newline="") as fp:
             sample = fp.read(8192)
@@ -1211,7 +1275,7 @@ def read_prescriptions_set_csv(path):
             if not {"name", "total_gy", "fractions"}.issubset(headers):
                 raise ValueError(
                     "CSV requires name,total_gy,fractions columns (or prescription,D,n). "
-                    "Optional columns: prescriptions_set,alpha_beta,is_reference."
+                    "Optional columns: prescriptions_set,alpha_beta,is_reference,local_control_pct."
                 )
             reader.fieldnames = headers
             for row in reader:
@@ -1247,6 +1311,12 @@ def read_prescriptions_set_csv(path):
                         f"CSV line {line}: total dose must be positive and fractions a positive integer."
                     )
                 schedules.append((label, total, int(fx)))
+                try:
+                    control = validated_local_control(row.get("local_control_pct"))
+                except ValueError as exc:
+                    raise ValueError(f"CSV line {line}: {exc}") from exc
+                if control is not None:
+                    controls[label] = control
                 flag = (row.get("is_reference") or "").strip().casefold()
                 if flag not in ("", "0", "false", "no", "1", "true", "yes"):
                     raise ValueError(f"CSV line {line}: is_reference must be 0 or 1.")
@@ -1290,6 +1360,7 @@ def read_prescriptions_set_csv(path):
         "alpha_beta": alpha_betas[0] if alpha_betas else None,
         "prescriptions": schedules,
         "reference_prescription": references[0] if references else None,
+        "local_control_pct": controls,
     }
 
 
@@ -1300,16 +1371,21 @@ def export_prescriptions_set(record, filename):
         raise ValueError("Prescriptions set name is required.")
     ab = validated_alpha_beta(record["alpha_beta"])
     rows = validate_schedules(record["prescriptions"])
+    controls = record.get("local_control_pct", {})
+    controls = {label: validated_local_control(controls.get(label)) for label, _, _ in rows}
     path = Path(filename)
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(
-            ["name", "total_gy", "fractions", "prescriptions_set", "alpha_beta", "is_reference"]
+            [
+                "name", "total_gy", "fractions", "prescriptions_set", "alpha_beta", "is_reference",
+                "local_control_pct",
+            ]
         )
         reference = record.get("reference_prescription")
         for label, total, fractions in rows:
             is_reference = reference is not None and (label, total, fractions) == tuple(reference)
-            writer.writerow([label, total, fractions, name, ab, int(is_reference)])
+            writer.writerow([label, total, fractions, name, ab, int(is_reference), controls[label]])
     return path
 
 
@@ -1598,6 +1674,7 @@ def build_analysis(dataset):
     reserve = float(reserves[0])
     s = float(rates[0]) if dq != 0 else None
     beds = fraction_bed(input_ab, [dq], [total / n for _, total, n in r["schedules"]])[0]
+    controls = r.get("local_control_pct", {})
     prescriptions = []
     for (name, total, n), eqd2, per_fraction_bed in zip(r["schedules"], r["eqd2"][i], beds):
         d = total / n
@@ -1614,6 +1691,7 @@ def build_analysis(dataset):
                 "RD_EQD2_Gy": float(eqd2),
                 "LQ_BED_Gy": lq_bed,
                 "LQ_EQD2_Gy": lq_eqd2,
+                "local_control_pct": controls.get(name),
                 "RD_deviation_Gy": float(eqd2 - r["mean"][i]),
                 "RD_minus_LQ_Gy": float(eqd2 - lq_eqd2) if lq_eqd2 is not None else None,
             }
@@ -1636,7 +1714,7 @@ def build_analysis(dataset):
     if reference_row is not None:
         _, total, fractions = reference_row
         reference = float(EQD2_FN(input_ab, dq, total / fractions, fractions))
-    return {
+    analysis = {
         "name": dataset.get("name") or "Prescriptions set",
         "alpha_beta": ab,
         "input_alpha_beta": input_ab,
@@ -1655,6 +1733,222 @@ def build_analysis(dataset):
         "source_result": r,
         "robustness": None,
     }
+    analysis["clinical"] = clinical_evaluation(analysis)
+    return analysis
+
+
+def _clinical_cluster(points):
+    """Find a compact strict majority separated by a gap on either axis."""
+    count = len(points)
+    minimum = max(3, count // 2 + 1)
+    widths = np.ptp(points, axis=0)
+    best = None
+    best_score = None
+    for axis in (0, 1):
+        other = 1 - axis
+        order = np.argsort(points[:, axis], kind="stable")
+        ordered = points[order]
+        for left in range(count - minimum + 1):
+            for right in range(left + minimum, count + 1):
+                gaps = []
+                if left:
+                    gaps.append(ordered[left, axis] - ordered[left - 1, axis])
+                if right < count:
+                    gaps.append(ordered[right, axis] - ordered[right - 1, axis])
+                axis_span = ordered[right - 1, axis] - ordered[left, axis]
+                if not gaps or min(gaps) <= axis_span:
+                    continue
+                span = np.ptp(ordered[left:right], axis=0)
+                if span[other] > 0.75 * widths[other]:
+                    continue
+                relative_span = np.divide(span, widths, out=np.zeros(2), where=widths > 0)
+                score = (-(right - left), np.prod(relative_span), np.sum(relative_span))
+                if best_score is None or score < best_score:
+                    best, best_score = order[left:right], score
+    return best
+
+
+def _fit_control_beta(eqd2, control, varying_dose):
+    """Fit a logit mean and common precision by beta maximum likelihood."""
+    n = len(control)
+    if n < (4 if varying_dose else 3):
+        return None, (
+            "Beta regression requires at least four outcomes with varying EQD2, "
+            "or three for a constant-EQD2 fit."
+        )
+    y = control / 100
+    if np.ptp(y) <= 1e-12:
+        return None, "A beta fit requires variation in observed local control."
+    from scipy.optimize import minimize
+    from scipy.special import betaln, digamma, expit
+
+    endpoints = bool(np.any((y == 0) | (y == 1)))
+    if endpoints:
+        y = (y * (n - 1) + 0.5) / n
+
+    center = float(eqd2.mean())
+    scale = float(np.max(np.abs(eqd2 - center))) if varying_dose else 1.0
+    design = np.ones((n, 2 if varying_dose else 1))
+    if varying_dose:
+        design[:, 1] = (eqd2 - center) / scale
+    log_y, log_one_minus_y = np.log(y), np.log1p(-y)
+    logit_y = log_y - log_one_minus_y
+
+    def objective(params):
+        mean = expit(design @ params[:-1])
+        phi = np.exp(params[-1])
+        a, b = mean * phi, (1 - mean) * phi
+        likelihood = (a - 1) * log_y + (b - 1) * log_one_minus_y - betaln(a, b)
+        a_score = log_y - digamma(a) + digamma(phi)
+        b_score = log_one_minus_y - digamma(b) + digamma(phi)
+        mean_score = phi * mean * (1 - mean) * (a_score - b_score)
+        gradient = np.r_[design.T @ mean_score, a @ a_score + b @ b_score]
+        return -likelihood.mean(), -gradient / n
+
+    initial = np.clip(np.linalg.lstsq(design, logit_y, rcond=None)[0], -12, 12)
+    mu = expit(design @ initial)
+    residual_var = np.mean((y - mu) ** 2)
+    start_phi = np.clip(np.mean(mu * (1 - mu)) / max(residual_var, 1e-12) - 1, 0.1, 1e4)
+    bounds = [(-15, 15)] * len(initial) + [(math.log(1e-3), math.log(1e6))]
+    fit = minimize(
+        objective,
+        np.r_[initial, math.log(start_phi)],
+        jac=True,
+        method="L-BFGS-B",
+        bounds=bounds,
+        options={"gtol": 1e-7, "ftol": 1e-12},
+    )
+    if not fit.success or not np.isfinite(fit.fun) or any(
+        value - lo < 1e-4 or hi - value < 1e-4 for value, (lo, hi) in zip(fit.x, bounds)
+    ):
+        return None, "The outcomes do not support a stable beta fit."
+    return {
+        "center_Gy": center,
+        "intercept": float(fit.x[0]),
+        "slope_per_Gy": float(fit.x[1] / scale) if varying_dose else None,
+        "precision": math.exp(fit.x[-1]),
+        "adjusted_endpoints": endpoints,
+    }, ""
+
+
+def _beta_control_prediction(fit, eqd2):
+    """Return the fitted mean and central 95% beta percentiles, in percent."""
+    from scipy.special import betaincinv, expit
+
+    eqd2 = np.asarray(eqd2)
+    mean = expit(fit["intercept"] + (fit["slope_per_Gy"] or 0) * (eqd2 - fit["center_Gy"]))
+    a, b = mean * fit["precision"], (1 - mean) * fit["precision"]
+    return 100 * mean, 100 * betaincinv(a, b, 0.025), 100 * betaincinv(a, b, 0.975)
+
+
+def _clinical_area_ratio(points, rows):
+    """RD enclosing area as a percentage of the LQ area for the same observations."""
+    lq = [row["LQ_EQD2_Gy"] for row in rows]
+    if any(x is None or not math.isfinite(x) for x in lq):
+        return None
+    lq_width = max(lq) - min(lq)
+    if lq_width <= 0 or np.ptp(points[:, 1]) <= 0:
+        return None
+    return float(100 * np.ptp(points[:, 0]) / lq_width)
+
+
+def clinical_evaluation(analysis):
+    """Describe observed local control against RD EQD2 at the calibrated parameters."""
+    observations = [row for row in analysis["prescriptions"] if row["local_control_pct"] is not None]
+    if not observations:
+        return None
+    points = np.array([(r["RD_EQD2_Gy"], r["local_control_pct"]) for r in observations])
+    eqd2, control = points.T
+    mean = points.mean(axis=0)
+    trend = None
+    varying_dose = not math.isclose(float(eqd2.min()), float(eqd2.max()), rel_tol=1e-12)
+    if varying_dose:
+        dx, dy = eqd2 - mean[0], control - mean[1]
+        slope = float(dx @ dy / (dx @ dx))
+        sst = float(dy @ dy)
+        trend = {
+            "slope": slope,
+            "intercept": float(mean[1] - slope * mean[0]),
+            "r_squared": (
+                float(np.clip(1 - np.sum((dy - slope * dx) ** 2) / sst, 0, 1)) if sst > 0 else None
+            ),
+        }
+
+    selected = _clinical_cluster(points)
+    cluster = None
+    if selected is not None:
+        subgroup = points[selected]
+        cluster = {
+            "minimum": subgroup.min(axis=0),
+            "maximum": subgroup.max(axis=0),
+            "indices": selected,
+            "area_percent": _clinical_area_ratio(subgroup, [observations[i] for i in selected]),
+        }
+    beta, beta_status = _fit_control_beta(eqd2, control, varying_dose)
+    return {
+        "name": analysis["name"],
+        "observations": observations,
+        "points": points,
+        "mean": mean,
+        "minimum": points.min(axis=0),
+        "maximum": points.max(axis=0),
+        "linear": trend,
+        "cluster": cluster,
+        "area_percent": _clinical_area_ratio(points, observations),
+        "beta": beta,
+        "beta_status": beta_status,
+    }
+
+
+def clinical_basic_summary(clinical):
+    mean, low, high = (clinical[key] for key in ("mean", "minimum", "maximum"))
+    trend = clinical["linear"]
+    rows = [
+        ("Observed prescriptions", str(len(clinical["observations"]))),
+        ("Mean RD EQD2", f"{mean[0]:.2f} Gy"),
+        ("Mean local control", f"{mean[1]:.2f}%"),
+        ("RD EQD2 range", f"{low[0]:.2f}–{high[0]:.2f} Gy"),
+        ("Local control range", f"{low[1]:.2f}–{high[1]:.2f}%"),
+        (
+            "Linear trend",
+            f"{mean[1]:.2f} {trend['slope']:+.3g} × (EQD2 − {mean[0]:.2f})"
+            if trend else "Unavailable at constant EQD2",
+        ),
+    ]
+    if trend and trend["r_squared"] is not None:
+        rows.append(("R²", f"{trend['r_squared']:.3f}"))
+    if clinical["area_percent"] is not None:
+        rows.append(("RD area / LQ area", f"{clinical['area_percent']:.1f}%"))
+    if clinical["cluster"] is not None:
+        cluster = clinical["cluster"]
+        eqd2_width, control_width = cluster["maximum"] - cluster["minimum"]
+        rows.append(("Cluster", f"{len(cluster['indices'])} prescriptions"))
+        rows.append(("Cluster widths", f"{eqd2_width:.2f} Gy × {control_width:.2f} pp"))
+        if cluster["area_percent"] is not None:
+            rows.append(("Cluster RD area / LQ area", f"{cluster['area_percent']:.1f}%"))
+    return rows
+
+
+def clinical_beta_summary(clinical):
+    fit = clinical["beta"]
+    if fit is None:
+        return clinical["beta_status"]
+    mean, low, high = _beta_control_prediction(fit, fit["center_Gy"])
+    slope = (
+        f"Logit slope {fit['slope_per_Gy']:+.4g} per Gy"
+        if fit["slope_per_Gy"] is not None else "Constant-EQD2 fit"
+    )
+    summary = (
+        f"{slope} · Precision {fit['precision']:.4g}\n"
+        f"At {fit['center_Gy']:.2f} Gy, fitted mean {mean:.2f}% and "
+        f"central 95% beta interval {low:.2f}–{high:.2f}%."
+    )
+    if fit["adjusted_endpoints"]:
+        summary += (
+            "\nWith 0% or 100% present, the beta fit transforms all proportions y "
+            "to (y × (N − 1) + 0.5) / N."
+        )
+    return summary
 
 
 def analysis_summary(a):
@@ -1845,6 +2139,11 @@ def export_analysis_tables(a, folder, format="csv"):
         "summary": [{"metric": k, "value": v} for k, v in analysis_summary(a)],
         "trends": [dict(model=model, **stats) for model, stats in a["models"].items()],
     }
+    clinical = a.get("clinical")
+    if clinical:
+        rows = clinical_basic_summary(clinical)
+        rows.append(("Beta regression", clinical_beta_summary(clinical)))
+        tables["clinical_evaluation"] = [{"metric": key, "value": value} for key, value in rows]
     if a["robustness"]:
         tables.update({k: v for k, v in a["robustness"].items() if isinstance(v, list)})
         robust_summary = {"held_out_RMSE_Gy": a["robustness"]["held_out_RMSE_Gy"]}
@@ -1889,6 +2188,7 @@ def export_analysis_tables(a, folder, format="csv"):
             "RD_EQD2_Gy": "RD EQD2 (Gy)",
             "LQ_BED_Gy": "LQ BED (Gy)",
             "LQ_EQD2_Gy": "LQ EQD2 (Gy)",
+            "local_control_pct": r"Local tumor control (\%)",
             "RD_deviation_Gy": "RD deviation (Gy)",
             "RD_minus_LQ_Gy": "RD minus LQ (Gy)",
             "metric": "Quantity",
@@ -2116,7 +2416,76 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     return ax
 
 
-def export_dispersion_plot(a, filename, ppi=300, **options):
+def draw_clinical_plot(fig, clinical, show_beta=True, show_interval=False, show_labels=True):
+    """Plot observations, descriptive statistics, and the bounded beta trend."""
+    from matplotlib.patches import Rectangle
+    from matplotlib.ticker import MaxNLocator, PercentFormatter
+
+    fig.clear()
+    fig.set_facecolor("white")
+    if clinical is None:
+        fig.text(0.5, 0.5, "Enter local tumor control for a selected prescription to see its EQD2 here.",
+                 ha="center", va="center", wrap=True)
+        return
+
+    ax = fig.add_axes([0.10, 0.20, 0.57, 0.68])
+    eqd2, control = clinical["points"].T
+    low, high = clinical["minimum"], clinical["maximum"]
+    dose_grid = np.linspace(low[0], high[0], 160)
+    y_ranges = [control]
+    cluster = clinical["cluster"]
+    if cluster is not None:
+        span = cluster["maximum"] - cluster["minimum"]
+        ax.add_patch(
+            Rectangle(cluster["minimum"], *span, facecolor="#cfe8e1",
+                      edgecolor="#397c70", linewidth=1.2, label="Prescription cluster", zorder=1)
+        )
+    ax.scatter(eqd2, control, s=44, color="#16384b", edgecolor="white", linewidth=0.7,
+               label="Observed local control", zorder=5, clip_on=False)
+    ax.axhline(clinical["mean"][1], color="#6b7785", linestyle=":", label="Observed mean")
+    trend = clinical["linear"]
+    if trend is not None:
+        values = clinical["mean"][1] + trend["slope"] * (dose_grid - clinical["mean"][0])
+        ax.plot(dose_grid, values, color="#44566c", linestyle="--", label="Linear trend")
+        y_ranges.append(values)
+    if (show_beta or show_interval) and clinical["beta"]:
+        beta_grid = dose_grid if low[0] < high[0] else low[0] + np.array([-0.8, 0.8])
+        mean, lower, upper = _beta_control_prediction(clinical["beta"], beta_grid)
+        if show_beta:
+            ax.plot(beta_grid, mean, color="#a34819", linewidth=1.8, label="Beta mean")
+            y_ranges.append(mean)
+        if show_interval:
+            ax.fill_between(beta_grid, lower, upper, color="#f8e6d8",
+                            label="Central 95% beta interval", zorder=0)
+            y_ranges.extend([lower, upper])
+    if show_labels:
+        for index, (row, x, y) in enumerate(zip(clinical["observations"], eqd2, control)):
+            above = index % 2 == 0 and y < 99
+            ax.annotate(f"{row['D_Gy']:g}/{row['n']}", (x, y), xytext=(5, 6 if above else -6),
+                        textcoords="offset points", va="bottom" if above else "top", fontsize=8)
+
+    x_pad = max(1.0, (high[0] - low[0]) * 0.12)
+    low_y, high_y = np.clip([min(values.min() for values in y_ranges),
+                             max(values.max() for values in y_ranges)], 0, 100)
+    y_pad = max(2.5, (high_y - low_y) * 0.12)
+    ax.set(xlim=(low[0] - x_pad, high[0] + x_pad),
+           ylim=(max(0, low_y - y_pad), min(100, high_y + y_pad)),
+           xlabel="Prescription RD EQD2 (Gy)", ylabel="Observed local tumor control")
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=7))
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+    ax.set_axisbelow(True)
+    ax.grid(color="#dce4e8", linestyle=":")
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2,
+              fontsize=8.5, frameon=False)
+    fig.suptitle("Local tumor control versus RD EQD2", fontsize=16, fontweight="bold", y=0.975)
+    ax.set_title(clinical["name"], fontsize=10, pad=9, wrap=True)
+    stats = clinical_basic_summary(clinical)
+    fig.text(0.70, 0.87, "Basic analysis", fontsize=11, fontweight="bold", va="top")
+    fig.text(0.70, 0.82, "\n\n".join(f"{key}\n{value}" for key, value in stats),
+             fontsize=8.5, va="top", linespacing=1.05)
+
+
+def _export_analysis_plot(data, filename, ppi, draw, size, **options):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
 
@@ -2124,10 +2493,9 @@ def export_dispersion_plot(a, filename, ppi=300, **options):
     path = Path(filename)
     if path.suffix.lower() not in IMAGE_EXTENSIONS:
         raise ValueError("Image format must be PDF, JPG, PNG, EPS, or SVG.")
-    fig = Figure(figsize=(8, 7.2), dpi=100)
+    fig = Figure(figsize=size, dpi=100)
     FigureCanvasAgg(fig)
-    options.setdefault("reference", a["reference"])
-    draw_dispersion_plot(fig, a, **options)
+    draw(fig, data, **options)
     if path.suffix.lower() == ".eps":
         for axis in fig.axes:
             for line in axis.get_xgridlines() + axis.get_ygridlines():
@@ -2144,6 +2512,15 @@ def export_dispersion_plot(a, filename, ppi=300, **options):
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=int(ppi), facecolor="white", bbox_inches="tight", pad_inches=0.08)
     fig.clear()
+
+
+def export_dispersion_plot(a, filename, ppi=300, **options):
+    options.setdefault("reference", a["reference"])
+    _export_analysis_plot(a, filename, ppi, draw_dispersion_plot, (8, 7.2), **options)
+
+
+def export_clinical_plot(clinical, filename, ppi=300, **options):
+    _export_analysis_plot(clinical, filename, ppi, draw_clinical_plot, (10, 6.4), **options)
 
 
 def open_analysis_window(parent, result):
@@ -2184,11 +2561,13 @@ def open_analysis_window(parent, result):
     tabs = ttk.Notebook(outer)
     tabs.pack(fill="both", expand=True)
     plot_page = ttk.Frame(tabs)
+    clinical_page = ttk.Frame(tabs, padding=6)
     prescription_page = ttk.Frame(tabs, padding=6)
     summary_page = ttk.Frame(tabs, padding=6)
     robust_page = ttk.Frame(tabs, padding=6)
     for page, label in [
         (plot_page, "Dispersion plot"),
+        (clinical_page, "Clinical evaluation"),
         (prescription_page, "Prescription values"),
         (summary_page, "Summary & trends"),
         (robust_page, "Robustness"),
@@ -2243,6 +2622,47 @@ def open_analysis_window(parent, result):
     ttk.Entry(options_bar, textvariable=reference_var, width=9).pack(side="left")
     ttk.Button(options_bar, text="Apply", command=redraw).pack(side="left", padx=5)
 
+    clinical_controls = ttk.Frame(clinical_page)
+    clinical_controls.pack(fill="x", pady=(0, 6))
+    clinical_stats = tk.StringVar()
+    clinical_beta = tk.StringVar()
+    ttk.Label(clinical_page, text="Basic analysis").pack(anchor="w")
+    ttk.Label(clinical_page, textvariable=clinical_stats, wraplength=815).pack(
+        anchor="w", pady=(0, 5)
+    )
+    ttk.Label(clinical_page, text="Beta regression").pack(anchor="w")
+    ttk.Label(clinical_page, textvariable=clinical_beta, wraplength=815).pack(
+        anchor="w", pady=(0, 5)
+    )
+    clinical_figure = Figure(figsize=(10, 6.4), dpi=100)
+    clinical_canvas = FigureCanvasTkAgg(clinical_figure, master=clinical_page)
+    clinical_canvas.get_tk_widget().pack(fill="both", expand=True)
+    show_beta = tk.BooleanVar(value=True)
+    show_interval = tk.BooleanVar(value=False)
+    clinical_labels = tk.BooleanVar(value=True)
+
+    def clinical_options():
+        return {
+            "show_beta": show_beta.get(),
+            "show_interval": show_interval.get(),
+            "show_labels": clinical_labels.get(),
+        }
+
+    def redraw_clinical():
+        draw_clinical_plot(clinical_figure, current()["clinical"], **clinical_options())
+        clinical_canvas.draw_idle()
+
+    beta_controls = []
+    for label, var in [
+        ("Beta mean", show_beta),
+        ("95% beta interval", show_interval),
+        ("Prescription labels", clinical_labels),
+    ]:
+        control = ttk.Checkbutton(clinical_controls, text=label, variable=var, command=redraw_clinical)
+        control.pack(side="left", padx=(0, 8))
+        if var is not clinical_labels:
+            beta_controls.append(control)
+
     def table(parent, fields, headings=None, name_width=260):
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
@@ -2281,6 +2701,7 @@ def open_analysis_window(parent, result):
         "RD_EQD2_Gy",
         "LQ_BED_Gy",
         "LQ_EQD2_Gy",
+        "local_control_pct",
         "RD_deviation_Gy",
         "RD_minus_LQ_Gy",
     )
@@ -2295,6 +2716,7 @@ def open_analysis_window(parent, result):
             "RD_EQD2_Gy": "RD EQD2 (Gy)",
             "LQ_BED_Gy": "LQ BED (Gy)",
             "LQ_EQD2_Gy": "LQ EQD2 (Gy)",
+            "local_control_pct": "Local control (%)",
             "RD_deviation_Gy": "RD minus mean (Gy)",
             "RD_minus_LQ_Gy": "RD minus LQ (Gy)",
         },
@@ -2470,9 +2892,10 @@ def open_analysis_window(parent, result):
             row=4, column=1, pady=(12, 0)
         )
 
-    def export_plot_dialog():
+    def export_plot_dialog(clinical=False):
+        plot_name = "clinical evaluation plot" if clinical else "dispersion plot"
         dialog = tk.Toplevel(window)
-        dialog.title("Export dispersion plot")
+        dialog.title("Export " + plot_name)
         dialog.transient(window)
         dialog.grab_set()
         body = ttk.Frame(dialog, padding=16)
@@ -2492,22 +2915,23 @@ def open_analysis_window(parent, result):
 
         def save_plot():
             try:
-                value = float(ppi.get())
-                if not math.isfinite(value) or not value.is_integer() or not 1 <= value <= 1200:
-                    raise ValueError("PPI must be an integer between 1 and 1200.")
-                display_options = options()
+                value = _validated_ppi(ppi.get())
+                suffix = "_clinical_evaluation" if clinical else "_dispersion"
                 ext = IMAGE_FORMATS[fmt.get()]
                 path = filedialog.asksaveasfilename(
                     parent=dialog,
-                    title="Save dispersion plot",
-                    initialfile=_analysis_stem(current()["name"]) + "_dispersion" + ext,
+                    title="Save " + plot_name,
+                    initialfile=_analysis_stem(current()["name"]) + suffix + ext,
                     defaultextension=ext,
                     filetypes=[(fmt.get(), "*" + ext)],
                 )
                 if not path:
                     return
                 path = Path(path).with_suffix(ext)
-                export_dispersion_plot(current(), path, ppi=value, **display_options)
+                if clinical:
+                    export_clinical_plot(current()["clinical"], path, ppi=value, **clinical_options())
+                else:
+                    export_dispersion_plot(current(), path, ppi=value, **options())
                 dialog.destroy()
                 messagebox.showinfo("Plot exported", f"Saved {path}", parent=window)
             except Exception as exc:
@@ -2522,6 +2946,11 @@ def open_analysis_window(parent, result):
     ttk.Button(toolbar, text="Export dispersion plot…", command=export_plot_dialog).pack(
         side="left"
     )
+    clinical_export = ttk.Button(
+        clinical_controls, text="Export clinical evaluation plot…",
+        command=lambda: export_plot_dialog(clinical=True),
+    )
+    clinical_export.pack(side="right")
 
     def select_set(_event=None):
         a = current()
@@ -2544,8 +2973,20 @@ def open_analysis_window(parent, result):
         )
         populate(ptable, a["prescriptions"])
         populate(stable, [{"metric": k, "value": v} for k, v in analysis_summary(a)])
+        clinical = a["clinical"]
+        if clinical:
+            summary = clinical_basic_summary(clinical)
+            clinical_stats.set(" · ".join(f"{key} {value}" for key, value in summary))
+            clinical_beta.set(clinical_beta_summary(clinical))
+        else:
+            clinical_stats.set("Enter observed local control in the prescription set editor.")
+            clinical_beta.set("Awaiting observed outcomes.")
+        clinical_export.configure(state="normal" if clinical else "disabled")
+        for control in beta_controls:
+            control.configure(state="normal" if clinical and clinical["beta"] else "disabled")
         refresh_robustness()
         redraw()
+        redraw_clinical()
 
     selector.bind("<<ComboboxSelected>>", select_set)
     window.bind("<Escape>", lambda event: window.destroy())
@@ -3011,6 +3452,7 @@ def launch_gui(db_path=None):
         tree.delete(*tree.get_children())
         for index, (name, total, fx) in enumerate(full["prescriptions"]):
             checked = selections.is_included(full, index)
+            control = full["local_control_pct"].get(name)
             tree.insert(
                 "",
                 "end",
@@ -3022,6 +3464,7 @@ def launch_gui(db_path=None):
                     fx,
                     f"{total / fx:.4g}",
                     "Yes" if (name, total, fx) == reference_schedule(full) else "",
+                    f"{control:.4g}%" if control is not None else "",
                 ),
             )
         tree.selection_set([row for row in selected if tree.exists(row)])
@@ -3116,7 +3559,7 @@ def launch_gui(db_path=None):
         details_area.pack(fill="both", expand=True)
         tree = ttk.Treeview(
             details_area,
-            columns=("include", "name", "D", "n", "d", "reference"),
+            columns=("include", "name", "D", "n", "d", "reference", "local_control"),
             show="headings",
             height=8,
         )
@@ -3127,6 +3570,7 @@ def launch_gui(db_path=None):
             ("n", "n", 60),
             ("d", "d (Gy/fraction)", 115),
             ("reference", "Reference", 80),
+            ("local_control", "Local control (%)", 120),
         ]:
             tree.heading(column, text=heading)
             tree.column(
@@ -3302,7 +3746,7 @@ def launch_gui(db_path=None):
             if record is None
             else "Edit prescriptions set"
         )
-        dialog.geometry("920x610")
+        dialog.geometry("1020x610")
         dialog.minsize(840, 420)
         dialog.transient(root)
         dialog.grab_set()
@@ -3327,7 +3771,7 @@ def launch_gui(db_path=None):
         top.columnconfigure(0, weight=1)
 
         prescriptions = ttk.LabelFrame(
-            body, text="Radiotherapy prescriptions — all fields required", padding=8
+            body, text="Radiotherapy prescriptions", padding=8
         )
         prescriptions.pack(fill="both", expand=True, pady=(10, 6))
         reference_choice = tk.StringVar(value="auto")
@@ -3338,11 +3782,15 @@ def launch_gui(db_path=None):
             value="auto",
         ).pack(anchor="w", pady=(0, 6))
         column_headers = ttk.Frame(prescriptions)
-        column_headers.pack(fill="x")
-        ttk.Label(column_headers, text="Reference", width=10).pack(side="left", padx=3)
-        ttk.Label(column_headers, text="Prescription name", width=49).pack(side="left", padx=3)
-        ttk.Label(column_headers, text="D (Gy)", width=14).pack(side="left", padx=3)
-        ttk.Label(column_headers, text="n (fractions)", width=14).pack(side="left", padx=3)
+        column_headers.pack(fill="x", padx=(0, 16))
+        widths = (78, 185, 92, 108, 162, 84)
+        for column, heading in enumerate(
+            ("Reference", "Prescription name", "D (Gy)", "n (fractions)", "Local tumor control (%)")
+        ):
+            ttk.Label(column_headers, text=heading).grid(row=0, column=column, sticky="w", padx=3)
+        for column, width in enumerate(widths):
+            column_headers.columnconfigure(column, minsize=width, weight=int(column == 1))
+        ttk.Label(column_headers, text="Optional").grid(row=1, column=4, sticky="w", padx=3)
 
         scrolling = ttk.Frame(prescriptions)
         scrolling.pack(fill="both", expand=True)
@@ -3373,41 +3821,46 @@ def launch_gui(db_path=None):
                 reference_choice.set("auto")
             row["frame"].destroy()
 
-        def add_row(name="", D="", n=""):
+        def add_row(name="", D="", n="", control=None):
             nonlocal next_row_id
             row_id = str(next_row_id)
             next_row_id += 1
             frame = ttk.Frame(rows_parent)
             frame.pack(fill="x", pady=3)
-            ttk.Radiobutton(frame, variable=reference_choice, value=row_id, width=10).pack(
-                side="left", padx=3
+            ttk.Radiobutton(frame, variable=reference_choice, value=row_id).grid(
+                row=0, column=0, sticky="w", padx=3
             )
             name_var, D_var, n_var = (
                 tk.StringVar(value=name),
                 tk.StringVar(value=str(D)),
                 tk.StringVar(value=str(n)),
             )
-            e_name = tk.Entry(frame, textvariable=name_var, width=50)
-            e_D = tk.Entry(frame, textvariable=D_var, width=15)
-            e_n = tk.Entry(frame, textvariable=n_var, width=15)
-            e_name.pack(side="left", padx=3, fill="x", expand=True)
-            e_D.pack(side="left", padx=3)
-            e_n.pack(side="left", padx=3)
+            control_var = tk.StringVar(value="" if control is None else str(control))
+            e_name = tk.Entry(frame, textvariable=name_var, width=18)
+            e_D = tk.Entry(frame, textvariable=D_var, width=8)
+            e_n = tk.Entry(frame, textvariable=n_var, width=8)
+            e_control = tk.Entry(frame, textvariable=control_var, width=12)
+            for column, entry in enumerate((e_name, e_D, e_n, e_control), start=1):
+                entry.grid(row=0, column=column, sticky="ew", padx=3)
+            for column, width in enumerate(widths):
+                frame.columnconfigure(column, minsize=width, weight=int(column == 1))
             row = {
                 "id": row_id,
                 "frame": frame,
                 "values": (name_var, D_var, n_var),
                 "entries": (e_name, e_D, e_n),
+                "control": control_var,
+                "control_entry": e_control,
             }
-            ttk.Button(frame, text="Remove", command=lambda: remove_row(row)).pack(
-                side="left", padx=(6, 2)
+            ttk.Button(frame, text="Remove", command=lambda: remove_row(row)).grid(
+                row=0, column=5, sticky="e", padx=(6, 2)
             )
             rows.append(row)
             sc_canvas.yview_moveto(1.0)
 
         previous = draft.get("prescriptions", [("", "", ""), ("", "", "")])
         for label, total, fractions in previous:
-            add_row(label, total, fractions)
+            add_row(label, total, fractions, draft.get("local_control_pct", {}).get(label))
             if (label, total, fractions) == draft.get("reference_prescription"):
                 reference_choice.set(rows[-1]["id"])
 
@@ -3432,6 +3885,8 @@ def launch_gui(db_path=None):
                 ab_bad = True
             mark(ab_entry, ab_bad)
             saved_rows = []
+            controls = {}
+            bad_controls = False
             for row in rows:
                 variables = row["values"]
                 values = [v.get().strip() for v in variables]
@@ -3449,10 +3904,18 @@ def launch_gui(db_path=None):
                 mark(row["entries"][1], bad_total)
                 mark(row["entries"][2], bad_n)
                 saved_rows.append(values)
+                try:
+                    controls[values[0]] = validated_local_control(row["control"].get())
+                    mark(row["control_entry"], False)
+                except ValueError:
+                    mark(row["control_entry"], True)
+                    bad_controls = True
             if not valid:
                 messagebox.showerror(
-                    "Required fields",
-                    "Fill every field. The input α/β for q ≥ 0 and D must be positive finite numbers, and n must be a positive integer. Invalid fields are highlighted.",
+                    "Prescription inputs",
+                    "Local tumor control must be a percentage from 0 to 100, or left blank."
+                    if bad_controls else "Enter the required names and positive α/β and D values, "
+                    "with a positive integer number of fractions.",
                     parent=dialog,
                 )
                 return
@@ -3470,6 +3933,7 @@ def launch_gui(db_path=None):
                         ),
                         None,
                     ),
+                    local_control_pct=controls,
                 )
             except (ValueError, KeyError) as exc:
                 messagebox.showerror("Cannot save prescriptions set", str(exc), parent=dialog)
@@ -3738,7 +4202,8 @@ def main():
     parser.add_argument(
         "--csv",
         type=str,
-        help="read schedule CSV with name,total_gy,fractions; optional prescriptions_set,alpha_beta,is_reference",
+        help="read schedule CSV with name,total_gy,fractions and optional "
+        "prescriptions_set,alpha_beta,is_reference,local_control_pct",
     )
     parser.add_argument(
         "--set", dest="set_name", type=str, help="batch-optimize a saved prescriptions set by name"
@@ -3794,6 +4259,7 @@ def main():
     )
     result["plot_settings"] = normalized_plot_settings({"title": a.plot_title or ""})
     result["reference_prescription"] = reference_schedule(reference_record)
+    result["local_control_pct"] = reference_record.get("local_control_pct", {})
     export(result, a.out)
     i = result["idx"]
     print("Symbolic formula:", EQD2_EXPR)
