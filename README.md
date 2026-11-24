@@ -6,17 +6,26 @@ The application provides prescription management, BED and EQD2 calculations, opt
 
 ## Installation
 
-### Windows executable
+### Desktop downloads
 
-Open `RD_EQD2_Optimizer.exe`. The executable includes its Python runtime and dependencies. Choose a writable folder when saving exports.
+Download the package for your operating system from the [latest GitHub release](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest). Each package includes the Python runtime and dependencies.
+
+| Platform | Download | Launch |
+| --- | --- | --- |
+| Windows x64 | [Portable executable](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-Windows-x86_64.exe) | Open the downloaded `.exe`. |
+| macOS Apple silicon | [App archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-macOS-arm64.zip) | Extract the archive and open `RD_EQD2_Optimizer.app`. |
+| macOS Intel | [App archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-macOS-x86_64.zip) | Extract the archive and open `RD_EQD2_Optimizer.app`. |
+| Linux x64 | [Executable archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-Linux-x86_64.tar.gz) | Extract the archive and run `./RD_EQD2_Optimizer` in a graphical session. |
+
+The Linux build targets Ubuntu 22.04 and compatible desktop distributions. The public Windows executable has no publisher signature, and the macOS app has no Developer ID notarization. Local security policy can restrict either download.
 
 ### Python application
 
-Install Python 3.11 or 3.12 with pip and Tcl/Tk. Download and extract the repository, open a terminal in its folder, and run:
+Install Python 3.11 or 3.12 with pip and Tcl/Tk. Clone or download the repository, open a terminal in its folder, and run:
 
 ```text
-python -m pip install -r requirements.txt
-python rd_eqd2_optimizer.py
+python -m pip install .
+rd-eqd2-optimizer
 ```
 
 If you downloaded the standalone `rd_eqd2_optimizer.py` file without the repository, install its dependencies and launch it with:
@@ -156,56 +165,35 @@ On Windows, the default files are:
 | Plot preferences | `%USERPROFILE%\.rd_dq_optimizer\plot_settings.json` |
 | Windows executable log | `%USERPROFILE%\.rd_dq_optimizer\application.log` |
 
-On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and Windows executable use the same default database. Back up the database file to retain saved sets.
+On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and packaged builds use the same default database. Back up the database file to retain saved sets.
 
 The original eight-prescription prostate set is updated in place if its prescription rows match the original preset. Saved α/β and reference choices carry forward. If you edited the rows under the original set name, the ten-prescription preset appears alongside your saved set.
 
 A different database can be selected with `--db` or the `RD_DQ_DB_PATH` environment variable.
 
-## Build a Windows executable
+## Build a desktop package
 
-Install:
-
-- Visual Studio 2022 with **Desktop development with C++** and **MSVC v143**.
-- 64-bit Python 3.11 or 3.12 with pip, venv, Tcl/Tk, and the Python launcher.
-
-If you use Python Install Manager, install the build runtime before building:
+Run the build on the target platform with 64-bit Python 3.11 or 3.12, pip, venv, and Tcl/Tk. Enable a graphical session for the runtime checks.
 
 ```text
-py install 3.12
+python tools/build.py Build Release
 ```
 
-Open `RD_EQD2_Optimizer.sln`, select **Release | x64**, and choose **Build > Build Solution**. The first build requires internet access to install dependencies. Run the resulting `dist\Release\RD_EQD2_Optimizer.exe`.
+The build installs pinned dependencies in `.venv-build`, verifies the Python source, creates the native app with PyInstaller, and runs the same checks against the packaged app. Release output is in `dist/Release`. On headless Linux, run the build under `xvfb-run -a`. On Windows, `Build.cmd Build Release` also works. Set `RD_PYTHON` to the full path of `python.exe` if the Windows launcher cannot find your interpreter.
 
-To build from Command Prompt, run:
+GitHub Actions builds and tests the platform packages on pull requests. Updating the project version in `pyproject.toml` on `main` builds the packages and publishes a GitHub release with SHA-256 checksums once the platform tests pass.
 
-```bat
-Build.cmd Build Release
-```
+### Sign local Windows Debug builds
 
-If Python is installed in a custom location:
-
-```bat
-set "RD_PYTHON=C:\Path\To\Python312\python.exe"
-Build.cmd Build Release
-```
-
-A Release build produces a single executable. A Debug build produces `dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe`; distribute its entire containing folder, including `_internal`.
-
-### Sign local Debug builds
-
-Install a Windows 10 or Windows 11 SDK through **Visual Studio Installer → Modify → Individual components**. This supplies SignTool.
-
-Open **View → Terminal** in Visual Studio and use the repository folder:
+Install a Windows 10 or Windows 11 SDK with SignTool. In PowerShell, open the repository folder and run:
 
 ```powershell
-cd "$env:USERPROFILE\source\repos\RD_Dq_Optimizer"
 py -3.12 tools\debug_signing.py setup
 ```
 
 Read the certificate trust description and type `TRUST` to confirm. Windows may also ask you to confirm trusting the certificate. The setup creates a one-year RSA code-signing certificate and trusts its public certificate in the current user's Root and TrustedPublisher stores. The non-exportable private key remains in the current user's Personal certificate store; it is not written to the repository. Only the certificate thumbprint is saved in `%LOCALAPPDATA%\RD_EQD2_Optimizer\debug-signing.json`. Repeating setup reuses an existing unexpired certificate.
 
-Select **Debug | x64 → Build Solution**, or run:
+Build and run the local Debug copy:
 
 ```powershell
 .\Build.cmd Build Debug

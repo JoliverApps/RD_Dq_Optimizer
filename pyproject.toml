@@ -1,5 +1,28 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rd-eqd2-optimizer"
+version = "1.0.0"
+description = "Desktop optimizer for Resilience–Depletion EQD2 and BED calculations"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+dynamic = ["dependencies"]
+
+[project.scripts]
+rd-eqd2-optimizer = "rd_eqd2_optimizer:main"
+
+[tool.setuptools]
+py-modules = ["rd_eqd2_optimizer"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+
 [tool.ruff]
-target-version = "py39"
+target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
