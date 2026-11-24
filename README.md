@@ -2,27 +2,36 @@
 
 RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). It evaluates standard shoulders, the single-hit linear law, and inverted shoulders across the selected q interval.
 
-The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing eight prescriptions at α/β = 1.5 Gy is available on first launch.
+The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing ten prescriptions at α/β = 1.5 Gy is available on first launch.
 
 ## Installation
 
-### Windows executable
+### Desktop downloads
 
-Open `RD_EQD2_Optimizer.exe`. The executable includes its Python runtime and dependencies. Choose a writable folder when saving exports.
+Download the package for your operating system from the [latest GitHub release](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest). Each package includes the Python runtime and dependencies.
+
+| Platform | Download | Launch |
+| --- | --- | --- |
+| Windows x64 | [Portable executable](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-Windows-x86_64.exe) | Open the downloaded `.exe`. |
+| macOS Apple silicon | [App archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-macOS-arm64.zip) | Extract the archive and open `RD_EQD2_Optimizer.app`. |
+| macOS Intel | [App archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-macOS-x86_64.zip) | Extract the archive and open `RD_EQD2_Optimizer.app`. |
+| Linux x64 | [Executable archive](https://github.com/JoliverApps/RD_Dq_Optimizer/releases/latest/download/RD_EQD2_Optimizer-Linux-x86_64.tar.gz) | Extract the archive and run `./RD_EQD2_Optimizer` in a graphical session. |
+
+The Linux build targets Ubuntu 22.04 and compatible desktop distributions. The public Windows executable has no publisher signature, and the macOS app has no Developer ID notarization. Local security policy can restrict either download.
 
 ### Python application
 
-Install Python 3.11 or 3.12 with pip and Tcl/Tk. Download and extract the repository, open a terminal in its folder, and run:
+Install Python 3.11 or 3.12 with pip and Tcl/Tk. Clone or download the repository, open a terminal in its folder, and run:
 
 ```text
-python -m pip install -r requirements.txt
-python rd_eqd2_optimizer.py
+python -m pip install .
+rd-eqd2-optimizer
 ```
 
 If you downloaded the standalone `rd_eqd2_optimizer.py` file without the repository, install its dependencies and launch it with:
 
 ```text
-python -m pip install numpy==2.2.6 matplotlib==3.10.3 sympy==1.14.0
+python -m pip install numpy==2.2.6 matplotlib==3.10.3 scipy==1.17.0 sympy==1.14.0
 python rd_eqd2_optimizer.py
 ```
 
@@ -79,6 +88,16 @@ At Dq = 0, the linear response gives BED = EQD2 = D. The sensitization rate s is
 
 For α/β = −2 Gy, LQ EQD2 is unavailable because its reference denominator is zero. RD results remain available. For other negative α/β values, LQ extrapolations can produce negative equivalent doses.
 
+### Clinical evaluation
+
+Enter an observed **Local tumor control (%)** for each prescription with available outcome data. Leave unavailable outcomes blank. After optimization, open **Analysis… → Clinical evaluation**. Each selected prescription with an outcome contributes one equally weighted point at its fitted RD EQD2. The summary and plot show means, observed minimum–maximum ranges, and an unweighted linear trend with R² when defined. The enclosing area on the RD scale is also shown relative to the LQ area when the comparison is defined.
+
+The plot shades a subgroup when it contains at least three observations and a strict majority of the points. Along one axis, each gap to its neighboring points must exceed the subgroup width. Along the other axis, the subgroup must span at most 75% of the full observed range. If several subgroups qualify, the app uses the largest and then the one with the smallest relative enclosing area.
+
+The beta regression fits a logit mean against EQD2 and a common precision. Its optional 95% band shows the fitted conditional 2.5th and 97.5th percentiles. A dose-dependent fit requires at least four outcomes and an intercept-only fit at constant EQD2 requires at least three. When any outcome is 0% or 100%, the beta likelihood uses the transformation `(y × (N − 1) + 0.5) / N` on all proportions. The scatter and basic analysis use the original observations. [Beta regression](https://doi.org/10.1080/0266476042000214501) · [Endpoint transformation](https://doi.org/10.1037/1082-989X.11.1.54)
+
+Use **Export clinical evaluation plot…** to save the figure.
+
 ### Robustness analysis
 
 Open the **Robustness** tab in the analysis window and click **Run robustness**. Leave-one-out analysis requires at least three prescriptions.
@@ -103,6 +122,7 @@ The CSV columns are:
 | `prescriptions_set` | Set name |
 | `alpha_beta` | α/β input for q ≥ 0, in Gy |
 | `is_reference` | Optional 1 for the chosen reference row, 0 or blank otherwise; at most one row may be marked |
+| `local_control_pct` | Optional observed local tumor control percentage from 0 to 100 |
 
 The first three columns are required for import. A file must describe one prescriptions set. Prescription names must be unique within that set. The `samples/prostate.csv` file provides an example.
 
@@ -145,54 +165,35 @@ On Windows, the default files are:
 | Plot preferences | `%USERPROFILE%\.rd_dq_optimizer\plot_settings.json` |
 | Windows executable log | `%USERPROFILE%\.rd_dq_optimizer\application.log` |
 
-On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and Windows executable use the same default database. Back up the database file to retain saved sets.
+On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and packaged builds use the same default database. Back up the database file to retain saved sets.
+
+The original eight-prescription prostate set is updated in place if its prescription rows match the original preset. Saved α/β and reference choices carry forward. If you edited the rows under the original set name, the ten-prescription preset appears alongside your saved set.
 
 A different database can be selected with `--db` or the `RD_DQ_DB_PATH` environment variable.
 
-## Build a Windows executable
+## Build a desktop package
 
-Install:
-
-- Visual Studio 2022 with **Desktop development with C++** and **MSVC v143**.
-- 64-bit Python 3.11 or 3.12 with pip, venv, Tcl/Tk, and the Python launcher.
-
-If you use Python Install Manager, install the build runtime before building:
+Run the build on the target platform with 64-bit Python 3.11 or 3.12, pip, venv, and Tcl/Tk. Enable a graphical session for the runtime checks.
 
 ```text
-py install 3.12
+python tools/build.py Build Release
 ```
 
-Open `RD_EQD2_Optimizer.sln`, select **Release | x64**, and choose **Build > Build Solution**. The first build requires internet access to install dependencies. Run the resulting `dist\Release\RD_EQD2_Optimizer.exe`.
+The build installs pinned dependencies in `.venv-build`, verifies the Python source, creates the native app with PyInstaller, and runs the same checks against the packaged app. Release output is in `dist/Release`. On headless Linux, run the build under `xvfb-run -a`. On Windows, `Build.cmd Build Release` also works. Set `RD_PYTHON` to the full path of `python.exe` if the Windows launcher cannot find your interpreter.
 
-To build from Command Prompt, run:
+GitHub Actions builds and tests the platform packages on pull requests. Updating the project version in `pyproject.toml` on `main` builds the packages and publishes a GitHub release with SHA-256 checksums once the platform tests pass.
 
-```bat
-Build.cmd Build Release
-```
+### Sign local Windows Debug builds
 
-If Python is installed in a custom location:
-
-```bat
-set "RD_PYTHON=C:\Path\To\Python312\python.exe"
-Build.cmd Build Release
-```
-
-A Release build produces a single executable. A Debug build produces `dist\Debug\RD_EQD2_Optimizer\RD_EQD2_Optimizer.exe`; distribute its entire containing folder, including `_internal`.
-
-### Sign local Debug builds
-
-Install a Windows 10 or Windows 11 SDK through **Visual Studio Installer → Modify → Individual components**. This supplies SignTool.
-
-Open **View → Terminal** in Visual Studio and use the repository folder:
+Install a Windows 10 or Windows 11 SDK with SignTool. In PowerShell, open the repository folder and run:
 
 ```powershell
-cd "$env:USERPROFILE\source\repos\RD_Dq_Optimizer"
 py -3.12 tools\debug_signing.py setup
 ```
 
 Read the certificate trust description and type `TRUST` to confirm. Windows may also ask you to confirm trusting the certificate. The setup creates a one-year RSA code-signing certificate and trusts its public certificate in the current user's Root and TrustedPublisher stores. The non-exportable private key remains in the current user's Personal certificate store; it is not written to the repository. Only the certificate thumbprint is saved in `%LOCALAPPDATA%\RD_EQD2_Optimizer\debug-signing.json`. Repeating setup reuses an existing unexpired certificate.
 
-Select **Debug | x64 → Build Solution**, or run:
+Build and run the local Debug copy:
 
 ```powershell
 .\Build.cmd Build Debug
@@ -207,7 +208,7 @@ To stop signing Debug builds, delete the local `debug-signing.json` settings fil
 
 | Problem | Action |
 | --- | --- |
-| Missing NumPy, Matplotlib, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
+| Missing NumPy, Matplotlib, SciPy, or SymPy | Run `python -m pip install -r requirements.txt` with the interpreter used to launch the application. |
 | Tkinter is unavailable | Install Tcl/Tk support for the selected Python interpreter. |
 | Build exits with code −1610612730 (0xA0000006) | Python Install Manager could not launch the requested runtime with automatic installation disabled. Run `py install 3.12`, then build again. |
 | Too many grid points | Increase q step or narrow the interval. |

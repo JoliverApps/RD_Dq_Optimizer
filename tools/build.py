@@ -1,4 +1,4 @@
-"""Windows build entry point used by both Visual Studio and Build.cmd."""
+"""Build and verify a native desktop bundle."""
 
 import argparse
 import hashlib
@@ -14,12 +14,13 @@ from debug_signing import sign_debug_executable
 
 ROOT = Path(__file__).resolve().parents[1]
 ENV_DIR = ROOT / ".venv-build"
-ENV_PYTHON = ENV_DIR / "Scripts" / "python.exe"
+ENV_PYTHON = ENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+APP_NAME = "RD_EQD2_Optimizer"
 CHECK_CODE = (
     "import sys, struct; "
     'assert sys.version_info[:2] in [(3,11),(3,12)], "Use Python 3.11 or 3.12"; '
     'assert struct.calcsize("P")==8, "Use 64-bit Python"; '
-    "import tkinter, _tkinter, sqlite3, numpy, matplotlib, sympy, PyInstaller"
+    "import tkinter, _tkinter, sqlite3, numpy, matplotlib, scipy, sympy, PyInstaller"
 )
 
 
@@ -95,6 +96,15 @@ def self_test(command, report):
         raise RuntimeError("Runtime self-test did not pass. See " + str(report))
 
 
+def built_executable(dist, configuration):
+    name = APP_NAME + (".exe" if os.name == "nt" else "")
+    if configuration == "Debug":
+        return dist / APP_NAME / name
+    if sys.platform == "darwin":
+        return dist / (APP_NAME + ".app") / "Contents" / "MacOS" / name
+    return dist / name
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -102,8 +112,6 @@ def main():
     )
     parser.add_argument("configuration", nargs="?", default="Release", choices=["Debug", "Release"])
     args = parser.parse_args()
-    if os.name != "nt":
-        parser.error("Build the Windows executable on Windows, using 64-bit Python 3.12 or 3.11.")
     if args.action == "Clean":
         clean(args.configuration)
         return 0
@@ -137,14 +145,13 @@ def main():
         ],
         env=environment,
     )
-    executable = (
-        dist / "RD_EQD2_Optimizer.exe"
-        if args.configuration == "Release"
-        else dist / "RD_EQD2_Optimizer" / "RD_EQD2_Optimizer.exe"
-    )
+    executable = built_executable(dist, args.configuration)
     if not executable.is_file():
         raise RuntimeError("The build did not produce " + str(executable))
-    signing = sign_debug_executable(executable) if args.configuration == "Debug" else None
+    signing = (
+        sign_debug_executable(executable) if args.configuration == "Debug" and os.name == "nt"
+        else None
+    )
     self_test([executable], work / "executable-test.json")
     packages = subprocess.check_output(
         [str(python), "-m", "pip", "freeze"], text=True, env=build_environment()

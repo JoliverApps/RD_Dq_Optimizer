@@ -39,6 +39,7 @@ def main():
             print(details, file=sys.stderr)
         if (
             getattr(sys, "frozen", False)
+            and sys.platform == "win32"
             and "--batch" not in sys.argv
             and "--self-test" not in sys.argv
         ):
