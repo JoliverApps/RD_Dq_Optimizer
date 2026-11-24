@@ -95,6 +95,15 @@ PROSTATE_PRESCRIPTIONS = [
     ("HYPO-RT-PC ultrahypofractionated", 42.70, 7),
     ("Fuller SBRT", 38.00, 4),
 ]
+# Observed outcomes supplied in prostate_clinical_outcomes.csv.
+PROSTATE_LOCAL_CONTROL_PCT = {
+    "Shared conventional reference": 91.6,
+    "RTOG 0126 IMRT": 97.0,
+    "RTOG 0415 conventional": 95.3,
+    "RTOG 0415 hypofractionated": 99.4,
+    "PROFIT hypofractionated": 86.92307692307692,
+    "Fuller SBRT": 99.0,
+}
 DEFAULT_Q_START, DEFAULT_Q_END, DEFAULT_Q_STEP = -50.0, 50.0, 0.001
 
 # Prescription sets available on first launch.
@@ -102,6 +111,7 @@ DEFAULT_SETS = {
     PROSTATE_SET_NAME: {
         "alpha_beta": PROSTATE_ALPHA_BETA,
         "prescriptions": PROSTATE_PRESCRIPTIONS,
+        "local_control_pct": PROSTATE_LOCAL_CONTROL_PCT,
     },
 }
 # Self-contained, SQLite-backed one-to-many prescription storage.
@@ -177,6 +187,35 @@ class PrescriptionStore:
             elif seeded["value"] == "1" and datasets is DEFAULT_SETS:
                 self._upgrade_prostate_default(con)
                 con.execute("UPDATE metadata SET value='2' WHERE key=?", (marker,))
+            if datasets is DEFAULT_SETS:
+                self._populate_prostate_local_control(con)
+
+    def _populate_prostate_local_control(self, con):
+        marker = "prostate_local_control_seeded"
+        if con.execute("SELECT 1 FROM metadata WHERE key=?", (marker,)).fetchone():
+            return
+        prostate = con.execute("SELECT id FROM tumors WHERE name=?", (PROSTATE_SET_NAME,)).fetchone()
+        if prostate is not None:
+            rows = [
+                tuple(row)
+                for row in con.execute(
+                    "SELECT name,total_gy,fractions FROM prescriptions "
+                    "WHERE tumor_id=? ORDER BY position,id",
+                    (prostate["id"],),
+                )
+            ]
+            if rows == PROSTATE_PRESCRIPTIONS:
+                con.executemany(
+                    "UPDATE prescriptions SET local_control_pct=? "
+                    "WHERE tumor_id=? AND name=? AND total_gy=? AND fractions=? "
+                    "AND local_control_pct IS NULL",
+                    [
+                        (PROSTATE_LOCAL_CONTROL_PCT[name], prostate["id"], name, dose, fractions)
+                        for name, dose, fractions in PROSTATE_PRESCRIPTIONS
+                        if name in PROSTATE_LOCAL_CONTROL_PCT
+                    ],
+                )
+        con.execute("INSERT INTO metadata(key,value) VALUES (?, '1')", (marker,))
 
     def _seed_set(self, con, name, dataset):
         cursor = con.execute(

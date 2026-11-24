@@ -429,7 +429,7 @@ def check_prostate_preset_upgrade(app, folder):
         "prescriptions": app.PROSTATE_PRESCRIPTIONS,
         "alpha_beta": 1.8,
         "reference_prescription": previous_rows[-1],
-        "local_control_pct": {},
+        "local_control_pct": app.PROSTATE_LOCAL_CONTROL_PCT,
     }
     assert len(app.PrescriptionStore(path, app.DEFAULT_SETS).list_sets()) == 1
 
@@ -451,6 +451,39 @@ def check_prostate_preset_upgrade(app, folder):
 def check_clinical_evaluation(app, folder):
     import numpy as np
     from matplotlib.figure import Figure
+
+    # Upgrade existing ten-prescription defaults without replacing saved observations.
+    old_defaults = {
+        app.PROSTATE_SET_NAME: {
+            "alpha_beta": 1.5,
+            "prescriptions": app.PROSTATE_PRESCRIPTIONS,
+        }
+    }
+    path = folder / "clinical-default-upgrade.sqlite3"
+    previous = app.PrescriptionStore(path, old_defaults)
+    record = previous.find_set(app.PROSTATE_SET_NAME)
+    previous.save_set(
+        record["name"], 1.8, record["prescriptions"], set_id=record["id"],
+        reference_prescription=record["prescriptions"][-1],
+        local_control_pct={"Fuller SBRT": 98.5},
+    )
+    current = app.PrescriptionStore(path, app.DEFAULT_SETS)
+    record = current.find_set(app.PROSTATE_SET_NAME)
+    assert record["local_control_pct"] == {**app.PROSTATE_LOCAL_CONTROL_PCT, "Fuller SBRT": 98.5}
+    assert record["alpha_beta"] == 1.8
+    assert record["reference_prescription"] == record["prescriptions"][-1]
+    current.save_set(
+        record["name"], 1.8, record["prescriptions"], set_id=record["id"], local_control_pct={},
+    )
+    assert app.PrescriptionStore(path, app.DEFAULT_SETS).get_set(record["id"])["local_control_pct"] == {}
+
+    path = folder / "clinical-customized-default.sqlite3"
+    previous = app.PrescriptionStore(path, old_defaults)
+    record = previous.find_set(app.PROSTATE_SET_NAME)
+    previous.save_set(
+        record["name"], 1.5, record["prescriptions"][:-1], set_id=record["id"],
+    )
+    assert app.PrescriptionStore(path, app.DEFAULT_SETS).get_set(record["id"])["local_control_pct"] == {}
 
     path = folder / "clinical.sqlite3"
     # Synthetic outcomes and schedules with a compact four-point majority.
@@ -668,7 +701,10 @@ def check_gui(app, db_path, result):
                 imported = app.read_prescriptions_set_csv(export_path)
                 assert len(imported["prescriptions"]) == original_count - 1
                 assert imported["alpha_beta"] == 2.2
-                assert imported["local_control_pct"] == {}
+                assert imported["local_control_pct"] == {
+                    name: value for name, value in app.PROSTATE_LOCAL_CONTROL_PCT.items()
+                    if name != app.PROSTATE_PRESCRIPTIONS[0][0]
+                }
                 optimize.invoke()
                 details = app.open_analysis_window(root, result)
                 assert details is not None and details.winfo_exists(), (
@@ -836,7 +872,7 @@ def run_checks(report_path, include_gui=True):
                 sample = app.read_prescriptions_set_csv(root / "samples" / "prostate.csv")
                 assert sample["prescriptions"] == app.PROSTATE_PRESCRIPTIONS
                 assert sample["alpha_beta"] == app.PROSTATE_ALPHA_BETA
-                assert sample["local_control_pct"] == {}
+                assert sample["local_control_pct"] == app.PROSTATE_LOCAL_CONTROL_PCT
                 assert app.reference_schedule(sample) == ("Shared conventional reference", 78, 39)
                 passed("Sample CSV matches the built-in prostate set")
             result = app.analyze(1.5, 0.01, 50.0, 0.01, app.PROSTATE_PRESCRIPTIONS)
