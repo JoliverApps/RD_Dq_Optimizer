@@ -403,6 +403,50 @@ def check_reference_prescriptions(app, folder):
         assert [r[0] for r in con.execute("SELECT id FROM prescriptions ORDER BY id")] == [11, 12]
 
 
+def check_prostate_preset_upgrade(app, folder):
+    previous_name = "Prostate — 8 prescriptions"
+    previous_rows = [
+        ("Shared conventional reference", 78.0, 39),
+        ("RTOG 0126 IMRT", 79.2, 44),
+        ("RTOG 0415 hypofractionated", 70.0, 28),
+        ("PROFIT hypofractionated", 60.0, 20),
+        ("PACE-B control", 62.0, 20),
+        ("Mantz SBRT", 40.0, 5),
+        ("HYPO-RT-PC ultrahypofractionated", 42.7, 7),
+        ("Fuller SBRT", 38.0, 4),
+    ]
+    previous_defaults = {previous_name: {"prescriptions": previous_rows, "alpha_beta": 1.5}}
+    path = folder / "upgrade-prostate.sqlite3"
+    previous = app.PrescriptionStore(path, previous_defaults)
+    set_id = previous.find_set(previous_name)["id"]
+    previous.save_set(
+        previous_name, 1.8, previous_rows, set_id=set_id, reference_prescription=previous_rows[-1]
+    )
+    current = app.PrescriptionStore(path, app.DEFAULT_SETS)
+    assert current.get_set(set_id) == {
+        "id": set_id,
+        "name": app.PROSTATE_SET_NAME,
+        "prescriptions": app.PROSTATE_PRESCRIPTIONS,
+        "alpha_beta": 1.8,
+        "reference_prescription": previous_rows[-1],
+    }
+    assert len(app.PrescriptionStore(path, app.DEFAULT_SETS).list_sets()) == 1
+
+    path = folder / "upgrade-customized-prostate.sqlite3"
+    previous = app.PrescriptionStore(path, previous_defaults)
+    set_id = previous.find_set(previous_name)["id"]
+    previous.save_set(previous_name, 1.5, previous_rows[:-1], set_id=set_id)
+    current = app.PrescriptionStore(path, app.DEFAULT_SETS)
+    assert current.get_set(set_id) == previous.get_set(set_id)
+    assert current.find_set(app.PROSTATE_SET_NAME)["prescriptions"] == app.PROSTATE_PRESCRIPTIONS
+    assert len(app.PrescriptionStore(path, app.DEFAULT_SETS).list_sets()) == 2
+
+    path = folder / "upgrade-deleted-prostate.sqlite3"
+    previous = app.PrescriptionStore(path, previous_defaults)
+    previous.delete_set(previous.find_set(previous_name)["id"])
+    assert app.PrescriptionStore(path, app.DEFAULT_SETS).list_sets() == []
+
+
 def check_gui(app, db_path, result):
     import tkinter as tk
     import traceback
@@ -492,6 +536,7 @@ def check_gui(app, db_path, result):
                 optimize = button("Run optimization")
                 assert len(notebook.tabs()) == 1
                 frame, prescriptions, ab_entry = view(app.PROSTATE_SET_NAME)
+                original_count = len(app.PROSTATE_PRESCRIPTIONS)
                 root.update_idletasks()
                 x, y, width, height = prescriptions.bbox("0", "#1")
                 prescriptions.event_generate("<Button-1>", x=x + width // 2, y=y + height // 2)
@@ -499,7 +544,7 @@ def check_gui(app, db_path, result):
                 root.setvar(ab_entry.cget("textvariable"), "2.2")
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
-                assert int(row[1]) == 7 and float(row[2]) == 2.2
+                assert int(row[1]) == original_count - 1 and float(row[2]) == 2.2
 
                 other_name = "Verification — saved set"
                 set_checkbox(other_name).invoke()
@@ -548,12 +593,13 @@ def check_gui(app, db_path, result):
 
                 button("Save α/β", frame).invoke()
                 saved = app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)
-                assert saved["alpha_beta"] == 2.2 and len(saved["prescriptions"]) == 8
+                assert saved["alpha_beta"] == 2.2 and len(saved["prescriptions"]) == original_count
                 export_path = Path(db_path).with_name("gui-export.csv")
                 filedialog.asksaveasfilename = lambda **_kwargs: str(export_path)
                 button("Export prescriptions set…").invoke()
                 imported = app.read_prescriptions_set_csv(export_path)
-                assert len(imported["prescriptions"]) == 7 and imported["alpha_beta"] == 2.2
+                assert len(imported["prescriptions"]) == original_count - 1
+                assert imported["alpha_beta"] == 2.2
                 optimize.invoke()
                 details = app.open_analysis_window(root, result)
                 assert details is not None and details.winfo_exists(), (
@@ -594,7 +640,7 @@ def check_gui(app, db_path, result):
                 saved = app.PrescriptionStore(db_path).find_set(app.PROSTATE_SET_NAME)
                 assert saved["reference_prescription"] == app.PROSTATE_PRESCRIPTIONS[-1]
                 _, prescriptions, _ = view(app.PROSTATE_SET_NAME)
-                assert prescriptions.set("7", "reference") == "Yes"
+                assert prescriptions.set(str(original_count - 1), "reference") == "Yes"
                 optimize.invoke()
                 button("Analysis…").invoke()
                 analysis = dialog("RD EQD2 — Detailed analysis")
@@ -686,12 +732,17 @@ def run_checks(report_path, include_gui=True):
                 assert Path(app.__file__).resolve() == root / "rd_eqd2_optimizer.py"
                 assert not (root / "src" / "rd_eqd2_optimizer.py").exists()
                 passed("Standalone and project use one application source")
+                sample = app.read_prescriptions_set_csv(root / "samples" / "prostate.csv")
+                assert sample["prescriptions"] == app.PROSTATE_PRESCRIPTIONS
+                assert sample["alpha_beta"] == app.PROSTATE_ALPHA_BETA
+                assert app.reference_schedule(sample) == ("Shared conventional reference", 78, 39)
+                passed("Sample CSV matches the built-in prostate set")
             result = app.analyze(1.5, 0.01, 50.0, 0.01, app.PROSTATE_PRESCRIPTIONS)
             i = result["idx"]
-            # Expected calibration for the eight-prescription prostate set.
-            np.testing.assert_allclose(result["q"][i], 3.543859355746318, atol=2e-5, rtol=0)
-            np.testing.assert_allclose(result["mean"][i], 75.81790297672867, atol=2e-5, rtol=0)
-            np.testing.assert_allclose(result["rsd"][i], 2.8365977004593472, atol=2e-5, rtol=0)
+            # Expected calibration for the ten-prescription prostate set.
+            np.testing.assert_allclose(result["q"][i], 3.4832728, atol=2e-5, rtol=0)
+            np.testing.assert_allclose(result["mean"][i], 75.5906074, atol=2e-5, rtol=0)
+            np.testing.assert_allclose(result["rsd"][i], 3.9191122, atol=2e-5, rtol=0)
             report.update(
                 Dq_Gy=float(result["q"][i]),
                 mean_EQD2_Gy=float(result["mean"][i]),
@@ -732,7 +783,8 @@ def run_checks(report_path, include_gui=True):
             store = app.PrescriptionStore(folder / "prescriptions.sqlite3", app.DEFAULT_SETS)
             assert len(store.list_sets()) == 1, "Only prostate may be seeded by default"
             prostate = store.find_set(app.PROSTATE_SET_NAME)
-            assert len(prostate["prescriptions"]) == 8
+            assert len(prostate["prescriptions"]) == 10
+            assert prostate["prescriptions"] == app.PROSTATE_PRESCRIPTIONS
             assert prostate["alpha_beta"] == 1.5
             reopened = app.PrescriptionStore(store.path, app.DEFAULT_SETS)
             assert reopened.list_sets() == store.list_sets(), "Defaults must not duplicate"
@@ -753,6 +805,8 @@ def run_checks(report_path, include_gui=True):
             reopened = app.PrescriptionStore(existing.path, app.DEFAULT_SETS)
             assert reopened.find_set(app.PROSTATE_SET_NAME) is None
             passed("Prostate-only defaults, idempotent initialization, and saved-set preservation")
+            check_prostate_preset_upgrade(app, folder)
+            passed("Existing prostate preset upgrade and preservation of customized or deleted sets")
             custom = store.save_set(
                 "Verification — custom", 1.5, [("Reference", 78, 39), ("SBRT", 38, 4)]
             )
@@ -773,7 +827,8 @@ def run_checks(report_path, include_gui=True):
             state.set_included(prostate, [0, 2], False)
             state.alpha_beta_text[str(prostate["id"])] = "2.2"
             configured = state.configured_set(prostate)
-            assert len(configured["prescriptions"]) == 6 and configured["alpha_beta"] == 2.2
+            assert len(configured["prescriptions"]) == len(prostate["prescriptions"]) - 2
+            assert configured["alpha_beta"] == 2.2
             fitted_subset = app.analyze_selected([configured], 0.01, 50, 0.02)["sets"][0]["result"]
             assert (
                 fitted_subset["schedules"] == configured["prescriptions"]
@@ -807,7 +862,7 @@ def run_checks(report_path, include_gui=True):
                 ]
             assert ids_before == ids_after
             assert store.get_set(prostate["id"])["alpha_beta"] == 2.2
-            state.set_included(prostate, range(8), False)
+            state.set_included(prostate, range(len(prostate["prescriptions"])), False)
             state.set_included(prostate, [0], True)
             try:
                 state.configured_set(prostate)
@@ -841,7 +896,7 @@ def run_checks(report_path, include_gui=True):
                 app.export_image(result, folder / ("profile" + extension), ppi=72)
             details = app.build_analysis({"name": "Prostate", "result": result})
             robustness = app.run_robustness(details)
-            assert len(robustness["leave_one_out"]) == 8
+            assert len(robustness["leave_one_out"]) == len(prostate["prescriptions"])
             for extension in app.IMAGE_FORMATS.values():
                 app.export_dispersion_plot(details, folder / ("dispersion" + extension), ppi=72)
             for format_name in ("csv", "tsv", "json", "tex"):

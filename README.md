@@ -2,7 +2,7 @@
 
 RD EQD2 Optimizer estimates the Resilience–Depletion (RD) shoulder descriptor Dq from a set of radiotherapy prescriptions by minimizing the dispersion of their equivalent doses in 2 Gy fractions (EQD2). It evaluates standard shoulders, the single-hit linear law, and inverted shoulders across the selected q interval.
 
-The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing eight prescriptions at α/β = 1.5 Gy is available on first launch.
+The application provides prescription management, BED and EQD2 calculations, optimization profiles, dose–dispersion plots, descriptive statistics, robustness analysis, and data and image exports. A prostate set containing ten prescriptions at α/β = 1.5 Gy is available on first launch.
 
 ## Installation
 
@@ -146,6 +146,8 @@ On Windows, the default files are:
 | Windows executable log | `%USERPROFILE%\.rd_dq_optimizer\application.log` |
 
 On other platforms, the data folder is `.rd_dq_optimizer` in the user's home directory. The Python application and Windows executable use the same default database. Back up the database file to retain saved sets.
+
+The original eight-prescription prostate set is updated in place if its prescription rows match the original preset. Saved α/β and reference choices carry forward. If you edited the rows under the original set name, the ten-prescription preset appears alongside your saved set.
 
 A different database can be selected with `--db` or the `RD_DQ_DB_PATH` environment variable.
 

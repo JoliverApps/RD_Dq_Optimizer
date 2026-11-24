@@ -2,7 +2,7 @@
 """RD EQD2 Optimizer: estimate Dq from radiotherapy prescriptions.
 
 Run this file to open the GUI. Dependencies: numpy, matplotlib, sympy, and Tkinter.
-The prostate set contains eight prescriptions at alpha/beta=1.5 Gy.
+The prostate set contains ten prescriptions at alpha/beta=1.5 Gy.
 CSV import: name,total_gy,fractions; optional prescriptions_set,alpha_beta,is_reference columns.
 Select individual prescriptions and edit alpha/beta directly on the main page.
 Batch example: python rd_eqd2_optimizer.py --batch --dataset prostate --out results
@@ -80,12 +80,14 @@ def EQD2_FN(ab, q, d, n):
 
 # Established localized prostate-cancer prescriptions.
 # EQD2 is always recalculated from D, n and alpha/beta, not stored as a fixed input.
-PROSTATE_SET_NAME = "Prostate — 8 prescriptions"
+PROSTATE_SET_NAME = "Prostate — 10 prescriptions"
 PROSTATE_ALPHA_BETA = 1.5
 # All doses are nominal prescription inputs; EQD2 is calculated at run time.
 PROSTATE_PRESCRIPTIONS = [
     ("Shared conventional reference", 78.00, 39),
     ("RTOG 0126 IMRT", 79.20, 44),
+    ("GETUG 06", 80.00, 40),
+    ("RTOG 0415 conventional", 73.80, 41),
     ("RTOG 0415 hypofractionated", 70.00, 28),
     ("PROFIT hypofractionated", 60.00, 20),
     ("PACE-B control", 62.00, 20),
@@ -145,6 +147,7 @@ class PrescriptionStore:
                 CREATE INDEX IF NOT EXISTS idx_prescriptions_tumor ON prescriptions(tumor_id, position);
                 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             """)
+            con.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in con.execute("PRAGMA table_info(prescriptions)")}
             if "is_reference" not in columns:
                 con.execute(
@@ -156,39 +159,81 @@ class PrescriptionStore:
                 "ON prescriptions(tumor_id) WHERE is_reference=1"
             )
             marker = "default_prescriptions_sets_seeded"
-            if (
-                seed_defaults
-                and datasets
-                and not con.execute("SELECT 1 FROM metadata WHERE key=?", (marker,)).fetchone()
-            ):
+            if not seed_defaults or not datasets:
+                return
+            seeded = con.execute("SELECT value FROM metadata WHERE key=?", (marker,)).fetchone()
+            if seeded is None:
                 for name, dataset in datasets.items():
                     if con.execute("SELECT 1 FROM tumors WHERE name=?", (name,)).fetchone():
                         continue
-                    cursor = con.execute(
-                        "INSERT INTO tumors (name,alpha_beta) VALUES (?,?)",
-                        (name, validated_alpha_beta(dataset["alpha_beta"])),
-                    )
-                    con.executemany(
-                        "INSERT INTO prescriptions (tumor_id,name,total_gy,fractions,position,is_reference) "
-                        "VALUES (?,?,?,?,?,?)",
-                        [
-                            (
-                                cursor.lastrowid,
-                                str(label),
-                                float(dose),
-                                int(fractions),
-                                position,
-                                int(
-                                    (label, dose, fractions)
-                                    == dataset.get("reference_prescription")
-                                ),
-                            )
-                            for position, (label, dose, fractions) in enumerate(
-                                dataset["prescriptions"]
-                            )
-                        ],
-                    )
-                con.execute("INSERT INTO metadata(key,value) VALUES (?,?)", (marker, "1"))
+                    self._seed_set(con, name, dataset)
+                version = "2" if datasets is DEFAULT_SETS else "1"
+                con.execute("INSERT INTO metadata(key,value) VALUES (?,?)", (marker, version))
+            elif seeded["value"] == "1" and datasets is DEFAULT_SETS:
+                self._upgrade_prostate_default(con)
+                con.execute("UPDATE metadata SET value='2' WHERE key=?", (marker,))
+
+    def _seed_set(self, con, name, dataset):
+        cursor = con.execute(
+            "INSERT INTO tumors (name,alpha_beta) VALUES (?,?)",
+            (name, validated_alpha_beta(dataset["alpha_beta"])),
+        )
+        reference = dataset.get("reference_prescription")
+        con.executemany(
+            "INSERT INTO prescriptions (tumor_id,name,total_gy,fractions,position,is_reference) "
+            "VALUES (?,?,?,?,?,?)",
+            [
+                (
+                    cursor.lastrowid,
+                    str(label),
+                    float(dose),
+                    int(fractions),
+                    position,
+                    int((label, dose, fractions) == reference),
+                )
+                for position, (label, dose, fractions) in enumerate(dataset["prescriptions"])
+            ],
+        )
+
+    def _upgrade_prostate_default(self, con):
+        previous = con.execute(
+            "SELECT id FROM tumors WHERE name=?", ("Prostate — 8 prescriptions",)
+        ).fetchone()
+        if previous is None or con.execute(
+            "SELECT 1 FROM tumors WHERE name=?", (PROSTATE_SET_NAME,)
+        ).fetchone():
+            return
+
+        previous_rows = [
+            ("Shared conventional reference", 78.00, 39),
+            ("RTOG 0126 IMRT", 79.20, 44),
+            ("RTOG 0415 hypofractionated", 70.00, 28),
+            ("PROFIT hypofractionated", 60.00, 20),
+            ("PACE-B control", 62.00, 20),
+            ("Mantz SBRT", 40.00, 5),
+            ("HYPO-RT-PC ultrahypofractionated", 42.70, 7),
+            ("Fuller SBRT", 38.00, 4),
+        ]
+        set_id = previous["id"]
+        saved_rows = [
+            tuple(row)
+            for row in con.execute(
+                "SELECT name,total_gy,fractions FROM prescriptions "
+                "WHERE tumor_id=? ORDER BY position,id",
+                (set_id,),
+            )
+        ]
+        if saved_rows != previous_rows:
+            self._seed_set(con, PROSTATE_SET_NAME, DEFAULT_SETS[PROSTATE_SET_NAME])
+            return
+
+        con.execute("UPDATE tumors SET name=? WHERE id=?", (PROSTATE_SET_NAME, set_id))
+        con.executemany(
+            "INSERT INTO prescriptions(tumor_id,name,total_gy,fractions,position) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(tumor_id,name) DO UPDATE SET position=excluded.position",
+            [(set_id, *row, position) for position, row in enumerate(PROSTATE_PRESCRIPTIONS)],
+        )
 
     def list_sets(self):
         with self._connection() as con:
