@@ -716,6 +716,11 @@ def check_gui(app, db_path, result):
                 assert button("Analysis…").instate(["!disabled"])
                 assert menu_state("Analysis…") == "normal"
                 assert workspace_tabs.tab(workspace_tabs.select(), "text") == "Results"
+                optimized_selector = next(
+                    w for w in children(root) if isinstance(w, ttk.Combobox)
+                    and app.PROSTATE_SET_NAME in w.cget("values")
+                )
+                assert optimized_selector.get() == app.PROSTATE_SET_NAME
                 # A failed run must never leave the previous analysis enabled.
                 with patch.object(messagebox, "showerror") as invalid_input:
                     root.setvar(step_entry.cget("textvariable"), "invalid")

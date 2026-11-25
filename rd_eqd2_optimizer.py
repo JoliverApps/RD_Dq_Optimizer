@@ -2647,10 +2647,8 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
     header = ttk.Frame(outer)
     header.pack(fill="x")
     ttk.Label(header, text="Optimized set").pack(side="left", padx=(0, 8))
-    chosen = tk.StringVar()
     selector = ttk.Combobox(
         header,
-        textvariable=chosen,
         state="readonly",
         width=68,
         values=[ds.get("name") or "Prescriptions set" for ds in datasets],
