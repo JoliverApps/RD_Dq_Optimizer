@@ -645,6 +645,142 @@ def check_clinical_evaluation(app, folder):
     assert app.build_analysis(result)["clinical"] is None
 
 
+def check_calculation_progress(app):
+    """Progress preserves numerical results and cancellation leaves no partial result."""
+    import numpy as np
+
+    rows = app.PROSTATE_SET["prescriptions"]
+    baseline = app.analyze(1.5, -.5, 10, .01, rows)
+    updates = []
+
+    def report(fraction, message):
+        assert 0 <= fraction <= 1 and message
+        if updates:
+            assert fraction >= updates[-1][0], (fraction, updates[-1])
+        updates.append((fraction, message))
+
+    actual = app.analyze(1.5, -.5, 10, .01, rows, progress=report)
+    np.testing.assert_array_equal(actual["q"], baseline["q"])
+    np.testing.assert_allclose(actual["eqd2"], baseline["eqd2"], rtol=1e-13)
+    assert actual["idx"] == baseline["idx"] and updates[-1][0] == 1
+    updates.clear()
+    detail = app.build_analysis({"name": "Progress", "result": actual}, progress=report)
+    assert updates[-1][0] == 1 and len(detail["clinical"]["observations"]) == 6
+
+    def cancel_when(message_part):
+        def cancel(fraction, message):
+            if message_part in message:
+                raise app.CalculationCancelled("Requested by the user")
+        return cancel
+
+    for calculate in (
+        lambda: app.analyze(1.5, -50, 50, .001, rows,
+                            progress=cancel_when("Evaluating candidate doses")),
+        lambda: app.build_analysis({"name": "Cancelled", "result": actual},
+                                   progress=cancel_when("Fitting beta regression")),
+    ):
+        try:
+            calculate()
+        except app.CalculationCancelled:
+            pass
+        else:
+            raise AssertionError("Calculation ignored cancellation")
+    sentinel = {"previous": "completed robustness"}
+    detail["robustness"] = sentinel
+    try:
+        app.run_robustness(detail, progress=cancel_when("Leave-one-out"))
+    except app.CalculationCancelled:
+        pass
+    else:
+        raise AssertionError("Robustness ignored cancellation")
+    assert detail["robustness"] is sentinel
+    updates.clear()
+    actual_robustness = app.run_robustness(detail, [1.5], progress=report)
+    assert updates[-1][0] == 1 and len(actual_robustness["leave_one_out"]) == 10
+
+
+def check_progress_dialog(app, root):
+    import threading
+    import tkinter as tk
+    from tkinter import ttk
+
+    main_thread = threading.get_ident()
+    previous_close = root.protocol("WM_DELETE_WINDOW")
+    errors = []
+
+    def children(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from children(child)
+
+    # A controlled worker lets the event loop demonstrate progress and modality.
+    gate = threading.Event()
+    worker_ids = []
+
+    def work(report):
+        worker_ids.append(threading.get_ident())
+        report(.42, "Evaluating test prescriptions")
+        if not gate.wait(5):
+            raise AssertionError("The modal dialog blocked the Tk event loop")
+        return "finished"
+
+    def observe(cancel=False):
+        try:
+            dialog = root.grab_current()
+            assert isinstance(dialog, tk.Toplevel) and root._calculation_active
+            bar = next(w for w in children(dialog) if isinstance(w, ttk.Progressbar))
+            assert float(bar.cget("value")) == 42
+            labels = [str(root.getvar(w.cget("textvariable"))) for w in children(dialog)
+                      if isinstance(w, ttk.Label) and w.cget("textvariable")]
+            assert "42%" in labels
+            root.tk.call(root.protocol("WM_DELETE_WINDOW"))
+            assert root.winfo_exists()
+            try:
+                assert root.attributes("-disabled")
+            except tk.TclError:
+                pass
+            if cancel:
+                next(w for w in children(dialog) if isinstance(w, ttk.Button)
+                     and w.cget("text") == "Cancel").invoke()
+        except Exception as exc:
+            errors.append(str(exc))
+        finally:
+            gate.set()
+
+    root.after(100, observe)
+    assert app.run_with_progress(root, "Test progress", work) == "finished"
+    assert worker_ids[0] != main_thread and not errors, errors
+    assert not root._calculation_active and root.grab_current() is None
+    assert root.protocol("WM_DELETE_WINDOW") == previous_close
+
+    gate.clear()
+    root.after(100, lambda: observe(cancel=True))
+    try:
+        app.run_with_progress(root, "Test cancellation", work)
+    except app.CalculationCancelled:
+        pass
+    else:
+        raise AssertionError("Cancel applied a worker's partial result")
+    assert not errors and not root._calculation_active, errors
+    assert root.protocol("WM_DELETE_WINDOW") == previous_close
+
+    owner = tk.Toplevel(root)
+    owner.update()
+    owner.grab_set()
+    try:
+        def fail(report):
+            raise ValueError("Test failure")
+        try:
+            app.run_with_progress(owner, "Test failure", fail)
+        except ValueError as exc:
+            assert str(exc) == "Test failure"
+        else:
+            raise AssertionError("Worker error was swallowed")
+        assert root.grab_current() is owner and not root._calculation_active
+    finally:
+        owner.destroy()
+
+
 def check_gui(app, db_path, result):
     import tkinter as tk
     import traceback
@@ -681,6 +817,7 @@ def check_gui(app, db_path, result):
                 from unittest.mock import patch
 
                 root.update()
+                check_progress_dialog(app, root)
 
                 def button(text, parent=None):
                     from types import SimpleNamespace
@@ -818,6 +955,34 @@ def check_gui(app, db_path, result):
                 assert button("Analysis…").instate(["!disabled"])
                 assert menu_state("Analysis…") == "normal"
                 assert workspace_tabs.tab(workspace_tabs.select(), "text") == "Results"
+                # Cancel actual optimization/clinical commands before they can replace a valid run.
+                import threading
+                saved_results = [results.item(item, "values") for item in results.get_children()]
+                for target in ("analyze", "clinical_evaluation"):
+                    entered = threading.Event()
+
+                    def slow_calculation(*args, **kwargs):
+                        report = kwargs.get("progress") if target == "analyze" else args[1]
+                        entered.set()
+                        for _ in range(500):
+                            report(.25, "Testing cancellation")
+                            threading.Event().wait(.01)
+                        raise AssertionError("Cancellation was not delivered")
+
+                    def cancel_running():
+                        if not entered.is_set():
+                            root.after(10, cancel_running)
+                            return
+                        owner = root.grab_current()
+                        next(w for w in children(owner) if isinstance(w, ttk.Button)
+                             and w.cget("text") == "Cancel").invoke()
+
+                    root.after(10, cancel_running)
+                    with patch.object(app, target, side_effect=slow_calculation):
+                        optimize.invoke()
+                    assert saved_results == [results.item(item, "values") for item in results.get_children()]
+                    assert button("Analysis…").instate(["!disabled"])
+                    assert not root._calculation_active and root.grab_current() is None
                 optimized_selector = next(
                     w for w in children(root) if isinstance(w, ttk.Combobox)
                     and app.PROSTATE_SET_NAME in w.cget("values")
@@ -1229,6 +1394,8 @@ def run_checks(report_path, include_gui=True):
             passed("Existing prostate preset upgrade and preservation of customized or deleted sets")
             check_prescription_model(app, folder)
             passed("Prescription objects retain outcomes through edits, selections, storage and exports")
+            check_calculation_progress(app)
+            passed("Calculation progress, cancellation, numerical equivalence and atomic results")
             check_clinical_evaluation(app, folder)
             passed("Observed local control storage, CSV round trip, clustering, beta fit and plot")
             custom = store.save_set(
@@ -1362,6 +1529,7 @@ def run_checks(report_path, include_gui=True):
             if include_gui:
                 check_gui(app, folder / "gui.sqlite3", result)
                 report["gui"] = "passed"
+                passed("Modal progress, worker threads, Cancel, failure recovery and restored input")
                 passed("Main GUI, optimization, detailed analysis, settings, and export dialogs")
             else:
                 report["gui"] = "skipped explicitly (--no-gui)"

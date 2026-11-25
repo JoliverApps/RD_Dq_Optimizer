@@ -53,6 +53,8 @@ The workspace has two main tabs. **Prescriptions** contains a subtab for each se
 
 A successful run opens the **Results** tab. Each set is optimized independently. Switching tabs preserves the current prescription selections and α/β entries. The **Optimize** checkboxes control which saved rows take part in the current fit.
 
+Minimization, clinical evaluation, and robustness calculations show a modal wait window with a progress bar, percentage, and **Cancel** button. The main and analysis windows are locked until the task finishes or acknowledges cancellation. **Cancel**, **Esc**, or closing the wait window stops the calculation at its next checkpoint. Cancelled work is discarded; any previous valid results remain available. Progress follows completed calculation stages and may pause during a fit. Robustness calculations requested during table export use the same wait window.
+
 With all ten built-in prostate prescriptions, the default search and SSE criterion give Dq ≈ 3.4833 Gy, mean EQD2 ≈ 75.5906 Gy, and sample SD ≈ 2.9625 Gy. The [sample CSV](samples/prostate.csv) contains the same prescription doses and fraction counts.
 
 ### Parameters and search interval

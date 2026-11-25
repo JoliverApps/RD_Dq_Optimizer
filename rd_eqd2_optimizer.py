@@ -847,13 +847,49 @@ def read_plot_settings(path):
         return normalized_plot_settings()
 
 
-def _bounded_minimum(objective, left, right, iterations=90):
+class CalculationCancelled(Exception):
+    """A calculation was stopped before its result could be committed."""
+
+
+def _report_progress(progress, fraction, message):
+    if progress is not None:
+        progress(fraction, message)
+
+
+def _progress_span(progress, start, end, message=None):
+    if progress is None:
+        return None
+    completed = 0.0
+
+    def report(fraction, detail):
+        nonlocal completed
+        completed = max(completed, min(1.0, max(0.0, fraction)))
+        progress(start + (end - start) * completed, message or detail)
+
+    return report
+
+
+def _evaluate_with_progress(ab, q, schedules, progress=None):
+    """Bound the work between cancellation checks without changing grid values."""
+    if progress is None:
+        return evaluate(ab, q, schedules)
+    chunks = []
+    chunk_size = max(1, min(1024, 16384 // len(schedules)))
+    for offset in range(0, len(q), chunk_size):
+        _report_progress(progress, offset / len(q), "Evaluating candidate doses")
+        chunks.append(evaluate(ab, q[offset:offset + chunk_size], schedules))
+    _report_progress(progress, 1, "Candidate doses evaluated")
+    return np.concatenate(chunks)
+
+
+def _bounded_minimum(objective, left, right, iterations=90, progress=None):
     """Refine an interior grid minimum using golden-section search (no extra dependency)."""
     ratio = (math.sqrt(5) - 1) / 2
     c = right - ratio * (right - left)
     d = left + ratio * (right - left)
     fc, fd = objective(c), objective(d)
-    for _ in range(iterations):
+    for iteration in range(iterations):
+        _report_progress(progress, iteration / iterations, "Refining the minimum")
         if fc <= fd:
             right, d, fd = d, c, fc
             c = right - ratio * (right - left)
@@ -864,6 +900,7 @@ def _bounded_minimum(objective, left, right, iterations=90):
             fd = objective(d)
         if right - left < 1e-12 * max(1, abs(left), abs(right)):
             break
+    _report_progress(progress, 1, "Minimum refined")
     return 0.5 * (left + right)
 
 
@@ -877,6 +914,7 @@ def _profile_bounds(
     lower=1e-4,
     upper=1e3,
     profile=None,
+    progress=None,
 ):
     """Find the profile's tolerance crossings on signed intervals, including zero.
 
@@ -886,8 +924,10 @@ def _profile_bounds(
     if criterion not in ("sd", "range"):
         raise ValueError("Unknown profile criterion.")
     target = minimum_value * (1.0 + fraction)
+    _report_progress(progress, 0, "Calculating profile bounds")
 
     def residual(q):
+        _report_progress(progress, 0, "Calculating profile bounds")
         vals = evaluate(ab, np.array([q]), schedules)[0]
         val = float(np.ptp(vals)) if criterion == "range" else float(np.std(vals, ddof=1))
         return val - target
@@ -918,17 +958,21 @@ def _profile_bounds(
 
     points, measures = profile
 
-    def connected_crossing(indices):
+    def connected_crossing(indices, begin):
         previous = optimum
-        for index in indices:
+        for position, index in enumerate(indices):
+            if position % 256 == 0:
+                _report_progress(progress, begin + .5 * position / max(1, len(indices)),
+                                 "Calculating profile bounds")
             point = float(points[index])
             if measures[index] > target:
                 return solve(min(point, previous), max(point, previous))
             previous = point
         return None
 
-    left = connected_crossing(np.flatnonzero(points < optimum)[::-1])
-    right = connected_crossing(np.flatnonzero(points > optimum))
+    left = connected_crossing(np.flatnonzero(points < optimum)[::-1], 0)
+    right = connected_crossing(np.flatnonzero(points > optimum), .5)
+    _report_progress(progress, 1, "Profile bounds calculated")
     return left, right
 
 
@@ -953,12 +997,13 @@ def _dispersion_value(eqd2, method):
     return float(np.sum((eqd2 - np.mean(eqd2)) ** 2))
 
 
-def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
+def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0, progress=None):
     """Search q over the selected interval and refine the best interior grid cell.
 
     SSE and sample SD use the SD profile for tolerance bounds; range uses
     the range profile. The requested endpoints and zero are retained.
     """
+    _report_progress(progress, 0, "Validating optimization inputs")
     bound_pct = float(bound_pct)
     if not math.isfinite(bound_pct) or bound_pct <= 0:
         raise ValueError(
@@ -969,7 +1014,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
     schedules = validate_schedules(schedules)
     ab = validated_alpha_beta(ab)
     q = grid_values(start, stop, step)
-    z = evaluate(ab, q, schedules)
+    z = _evaluate_with_progress(ab, q, schedules, _progress_span(progress, .02, .40))
     statistics = _profile_statistics(z)
     objective_key = {"range": "spread", "sd": "sample_sd", "sse": "sse"}[method]
     idx = int(np.argmin(statistics[objective_key]))
@@ -979,11 +1024,12 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
             row = evaluate(ab, np.array([value]), schedules)[0]
             return _dispersion_value(row, method)
 
-        refined = _bounded_minimum(objective, float(q[idx - 1]), float(q[idx + 1]))
+        refined = _bounded_minimum(objective, float(q[idx - 1]), float(q[idx + 1]),
+                                   progress=_progress_span(progress, .40, .55))
         # Include the refined minimum in the plotted curve and the exported CSV.
         if float(q[0]) < refined < float(q[-1]) and abs(refined - q[idx]) > 1e-10:
             q = np.insert(q, int(np.searchsorted(q, refined)), refined)
-            z = evaluate(ab, q, schedules)
+            z = _evaluate_with_progress(ab, q, schedules, _progress_span(progress, .55, .80))
             statistics = _profile_statistics(z)
             idx = int(np.argmin(statistics[objective_key]))
     dq = float(q[idx])
@@ -1003,6 +1049,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
         lower=float(q[0]),
         upper=float(q[-1]),
         profile=(q, statistics["spread"] if method == "range" else sample_sd),
+        progress=_progress_span(progress, .82, .96),
     )
     fraction_doses = np.array([p.dose_per_fraction_gy for p in schedules])
     centered_doses = fraction_doses - fraction_doses.mean()
@@ -1014,6 +1061,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
     )
     rsd = 100.0 * sample_sd / mean
     eta = 100.0 * np.abs(slope) * np.ptp(fraction_doses) / mean
+    _report_progress(progress, 1, "Optimization complete")
     return dict(
         q=q,
         eqd2=z,
@@ -1035,7 +1083,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
     )
 
 
-def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0):
+def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0, progress=None):
     """Optimize each configured prescriptions set independently at its own α/β.
 
     ``selections`` contain names, alpha_beta values, and selected prescriptions.
@@ -1044,7 +1092,7 @@ def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0)
     if not selections:
         raise ValueError("Select at least one prescriptions set to optimize and plot.")
     result_sets = []
-    for record in selections:
+    for index, record in enumerate(selections):
         res = analyze(
             record["alpha_beta"],
             start,
@@ -1053,6 +1101,9 @@ def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0)
             record["prescriptions"],
             method=method,
             bound_pct=bound_pct,
+            progress=_progress_span(progress, index / len(selections),
+                                    (index + 1) / len(selections),
+                                    f"Minimizing {record['name']}"),
         )
         res["reference_prescription"] = reference_schedule(record)
         result_sets.append({"name": record["name"], "id": record.get("id"), "result": res})
@@ -1685,8 +1736,9 @@ def _distribution(values, doses):
     }
 
 
-def build_analysis(dataset):
+def build_analysis(dataset, progress=None):
     """Calculate per-prescription BED, EQD2, and descriptive statistics."""
+    _report_progress(progress, 0, "Calculating prescription values")
     r = dataset["result"]
     i, ab = r["idx"], r["ab"]
     dq = float(r["q"][i])
@@ -1697,7 +1749,8 @@ def build_analysis(dataset):
     s = float(rates[0]) if dq != 0 else None
     beds = fraction_bed(input_ab, [dq], [p.dose_per_fraction_gy for p in r["schedules"]])[0]
     prescriptions = []
-    for p, eqd2, per_fraction_bed in zip(r["schedules"], r["eqd2"][i], beds):
+    for index, (p, eqd2, per_fraction_bed) in enumerate(zip(r["schedules"], r["eqd2"][i], beds)):
+        _report_progress(progress, .2 * index / len(beds), "Calculating prescription values")
         name, total, n = p.schedule_key
         d = p.dose_per_fraction_gy
         bed = n * per_fraction_bed
@@ -1755,11 +1808,12 @@ def build_analysis(dataset):
         "source_result": r,
         "robustness": None,
     }
-    analysis["clinical"] = clinical_evaluation(analysis)
+    analysis["clinical"] = clinical_evaluation(analysis, _progress_span(progress, .3, 1))
+    _report_progress(progress, 1, "Clinical evaluation complete")
     return analysis
 
 
-def _clinical_cluster(points):
+def _clinical_cluster(points, progress=None):
     """Find a compact strict majority separated by a gap on either axis."""
     count = len(points)
     minimum = max(3, count // 2 + 1)
@@ -1771,7 +1825,11 @@ def _clinical_cluster(points):
         order = np.argsort(points[:, axis], kind="stable")
         ordered = points[order]
         for left in range(count - minimum + 1):
+            _report_progress(progress, (axis + left / max(1, count - minimum + 1)) / 2,
+                             "Finding the prescription cluster")
             for right in range(left + minimum, count + 1):
+                if right % 256 == 0:
+                    _report_progress(progress, 0, "Finding the prescription cluster")
                 gaps = []
                 if left:
                     gaps.append(ordered[left, axis] - ordered[left - 1, axis])
@@ -1787,10 +1845,11 @@ def _clinical_cluster(points):
                 score = (-(right - left), np.prod(relative_span), np.sum(relative_span))
                 if best_score is None or score < best_score:
                     best, best_score = order[left:right], score
+    _report_progress(progress, 1, "Prescription cluster evaluated")
     return best
 
 
-def _fit_control_beta(eqd2, control, varying_dose):
+def _fit_control_beta(eqd2, control, varying_dose, progress=None):
     """Fit a logit mean and common precision by beta maximum likelihood."""
     n = len(control)
     if n < (4 if varying_dose else 3):
@@ -1817,6 +1876,7 @@ def _fit_control_beta(eqd2, control, varying_dose):
     logit_y = log_y - log_one_minus_y
 
     def objective(params):
+        _report_progress(progress, 0, "Fitting beta regression")
         mean = expit(design @ params[:-1])
         phi = np.exp(params[-1])
         a, b = mean * phi, (1 - mean) * phi
@@ -1840,6 +1900,7 @@ def _fit_control_beta(eqd2, control, varying_dose):
         bounds=bounds,
         options={"gtol": 1e-7, "ftol": 1e-12},
     )
+    _report_progress(progress, 1, "Beta regression evaluated")
     if not fit.success or not np.isfinite(fit.fun) or any(
         value - lo < 1e-4 or hi - value < 1e-4 for value, (lo, hi) in zip(fit.x, bounds)
     ):
@@ -1874,10 +1935,12 @@ def _clinical_area_ratio(points, rows):
     return float(100 * np.ptp(points[:, 0]) / lq_width)
 
 
-def clinical_evaluation(analysis):
+def clinical_evaluation(analysis, progress=None):
     """Describe observed local control against RD EQD2 at the calibrated parameters."""
+    _report_progress(progress, 0, "Summarizing observed local control")
     observations = [row for row in analysis["prescriptions"] if row["local_control_pct"] is not None]
     if not observations:
+        _report_progress(progress, 1, "No observed outcomes supplied")
         return None
     points = np.array([(r["RD_EQD2_Gy"], r["local_control_pct"]) for r in observations])
     eqd2, control = points.T
@@ -1896,7 +1959,7 @@ def clinical_evaluation(analysis):
             ),
         }
 
-    selected = _clinical_cluster(points)
+    selected = _clinical_cluster(points, _progress_span(progress, .15, .60))
     cluster = None
     if selected is not None:
         subgroup = points[selected]
@@ -1906,7 +1969,9 @@ def clinical_evaluation(analysis):
             "indices": selected,
             "area_percent": _clinical_area_ratio(subgroup, [observations[i] for i in selected]),
         }
-    beta, beta_status = _fit_control_beta(eqd2, control, varying_dose)
+    beta, beta_status = _fit_control_beta(eqd2, control, varying_dose,
+                                         _progress_span(progress, .60, .98))
+    _report_progress(progress, 1, "Clinical evaluation complete")
     return {
         "name": analysis["name"],
         "observations": observations,
@@ -2025,12 +2090,18 @@ def analysis_summary(a):
     return rows
 
 
-def run_robustness(a, alpha_beta_values=None):
+def run_robustness(a, alpha_beta_values=None, progress=None):
+    _report_progress(progress, 0, "Preparing robustness analysis")
     r = a["source_result"]
     start = float(r.get("search_start", r["q"][0]))
     stop = float(r.get("search_end", r["q"][-1]))
     step = float(r["search_step"]) if "search_step" in r else float(np.median(np.diff(r["q"])))
     rows = r["schedules"]
+    sensitivity_values = [validated_alpha_beta(value) for value in (alpha_beta_values or [
+        a["input_alpha_beta"] * 2 / 3, a["input_alpha_beta"], a["input_alpha_beta"] * 4 / 3
+    ])]
+    loo_count = len(rows) if len(rows) >= 3 else 0
+    tasks = loo_count + len(sensitivity_values) + 1
     held_out = []
     if len(rows) >= 3:
         for omitted in range(len(rows)):
@@ -2043,8 +2114,12 @@ def run_robustness(a, alpha_beta_values=None):
                 subset,
                 method=a["method"],
                 bound_pct=a["bound_pct"],
+                progress=_progress_span(progress, omitted / tasks, (omitted + .8) / tasks,
+                                        f"Leave-one-out {omitted + 1} of {loo_count}"),
             )
-            detail = build_analysis({"name": a["name"], "result": fitted})
+            detail = build_analysis({"name": a["name"], "result": fitted},
+                                     _progress_span(progress, (omitted + .8) / tasks,
+                                                    (omitted + 1) / tasks))
             dq = detail["D_q"]
             name, total, n = rows[omitted].schedule_key
             e = float(evaluate(a["input_alpha_beta"], np.array([dq]), rows)[0, omitted])
@@ -2061,14 +2136,13 @@ def run_robustness(a, alpha_beta_values=None):
                 }
             )
     sensitivity = []
-    for ab in alpha_beta_values or [
-        a["input_alpha_beta"] * 2 / 3,
-        a["input_alpha_beta"],
-        a["input_alpha_beta"] * 4 / 3,
-    ]:
-        ab = validated_alpha_beta(ab)
-        fitted = analyze(ab, start, stop, step, rows, method=a["method"], bound_pct=a["bound_pct"])
-        detail = build_analysis({"name": a["name"], "result": fitted})
+    for index, ab in enumerate(sensitivity_values):
+        task = loo_count + index
+        fitted = analyze(ab, start, stop, step, rows, method=a["method"], bound_pct=a["bound_pct"],
+                          progress=_progress_span(progress, task / tasks, (task + .8) / tasks,
+                                                  f"α/β sensitivity {index + 1} of {len(sensitivity_values)}"))
+        detail = build_analysis({"name": a["name"], "result": fitted},
+                                 _progress_span(progress, (task + .8) / tasks, (task + 1) / tasks))
         sensitivity.append(
             {
                 "alpha_beta_Gy": ab,
@@ -2086,15 +2160,20 @@ def run_robustness(a, alpha_beta_values=None):
     doses = np.array([p.dose_per_fraction_gy for p in rows])
     centered = doses - doses.mean()
     flat = None
+    trend_progress = _progress_span(progress, (tasks - 1) / tasks, 1)
     if float(centered @ centered) > 0:
 
         def slope(q):
             vals = evaluate(a["input_alpha_beta"], np.array([q]), rows)[0]
             return abs(float(centered @ (vals - vals.mean()) / (centered @ centered)))
 
-        j = min(range(len(grid)), key=lambda j: slope(float(grid[j])))
+        # Reuse the fitted grid instead of recalculating every prescription one q at a time.
+        _report_progress(trend_progress, 0, "Finding the horizontal trend")
+        j = int(np.nanargmin(np.abs(r["slope"])))
         qflat = (
-            _bounded_minimum(slope, float(grid[j - 1]), float(grid[j + 1]))
+            _bounded_minimum(slope, float(grid[j - 1]), float(grid[j + 1]),
+                             progress=_progress_span(trend_progress, .1, .9,
+                                                     "Refining the horizontal trend"))
             if 0 < j < len(grid) - 1
             else float(grid[j])
         )
@@ -2104,6 +2183,7 @@ def run_robustness(a, alpha_beta_values=None):
             "SD_Gy": float(vals.std(ddof=1)),
             "absolute_slope": slope(qflat),
         }
+    _report_progress(progress, 1, "Robustness analysis complete")
     a["robustness"] = {
         "leave_one_out": held_out,
         "alpha_beta_sensitivity": sensitivity,
@@ -2605,6 +2685,155 @@ def open_print_preview(filename):
         subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
 
 
+def run_with_progress(parent, title, work):
+    """Run pure calculation work off the Tk thread behind a cancellable modal dialog.
+
+    ``work(report)`` must not access Tk or mutate displayed results. The result is
+    returned only after successful completion; callers commit it on the Tk thread.
+    """
+    import threading
+    import tkinter as tk
+    from tkinter import ttk
+
+    root = parent.winfo_toplevel()._root()
+    if getattr(root, "_calculation_active", False):
+        raise CalculationCancelled("Another calculation is already running.")
+    root._calculation_active = True
+    previous_grab = root.grab_current()
+    previous_focus = root.focus_get()
+    cancelled, finished = threading.Event(), threading.Event()
+    lock = threading.Lock()
+    state = {"fraction": 0.0, "message": "Preparing calculation…"}
+    blocked = []
+    timer = None
+    dialog = tk.Toplevel(parent)
+    dialog.title(title)
+    dialog.transient(parent.winfo_toplevel())
+    dialog.resizable(False, False)
+    body = ttk.Frame(dialog, padding=20)
+    body.pack(fill="both", expand=True)
+    ttk.Label(body, text=title, font=("TkDefaultFont", 12, "bold")).pack(anchor="w")
+    message = tk.StringVar(value=state["message"])
+    percent = tk.StringVar(value="0%")
+    ttk.Label(body, textvariable=message, wraplength=420).pack(anchor="w", pady=(10, 8))
+    progress = ttk.Progressbar(body, mode="determinate", maximum=100, length=420)
+    progress.pack(fill="x")
+    ttk.Label(body, textvariable=percent).pack(anchor="e", pady=(3, 10))
+
+    def cancel(_event=None):
+        cancelled.set()
+        message.set("Cancelling…")
+        cancel_button.configure(text="Cancelling…", state="disabled")
+        return "break"
+
+    cancel_button = ttk.Button(body, text="Cancel", command=cancel)
+    cancel_button.pack(anchor="e")
+    dialog.protocol("WM_DELETE_WINDOW", cancel)
+    dialog.bind("<Escape>", cancel)
+
+    def report(fraction, detail):
+        if cancelled.is_set():
+            raise CalculationCancelled("Calculation cancelled.")
+        with lock:
+            state["fraction"] = max(state["fraction"], min(.99, max(0.0, float(fraction))))
+            state["message"] = detail
+
+    def calculate():
+        try:
+            result = work(report)
+            if cancelled.is_set():
+                raise CalculationCancelled("Calculation cancelled.")
+            state["result"] = result
+        except BaseException as exc:
+            state["error"] = exc
+        finally:
+            finished.set()
+
+    def poll():
+        nonlocal timer
+        if finished.is_set():
+            if not cancelled.is_set() and "error" not in state:
+                progress.configure(value=100)
+                percent.set("100%")
+            dialog.destroy()
+            return
+        if not cancelled.is_set():
+            with lock:
+                progress.configure(value=state["fraction"] * 100)
+                percent.set(f"{int(state['fraction'] * 100)}%")
+                message.set(state["message"])
+        timer = dialog.after(40, poll)
+
+    def windows(widget):
+        if (widget is root or isinstance(widget, tk.Toplevel)) and widget is not dialog:
+            yield widget
+        for child in widget.winfo_children():
+            if child is not dialog:
+                yield from windows(child)
+
+    try:
+        dialog.update_idletasks()
+        owner = parent.winfo_toplevel()
+        x = max(0, owner.winfo_rootx() + (owner.winfo_width() - dialog.winfo_width()) // 2)
+        y = max(0, owner.winfo_rooty() + (owner.winfo_height() - dialog.winfo_height()) // 2)
+        dialog.geometry(f"+{x}+{y}")
+        for window in windows(root):
+            previous_close = window.protocol("WM_DELETE_WINDOW")
+            window.protocol("WM_DELETE_WINDOW", dialog.lift)
+            busy_close = window.protocol("WM_DELETE_WINDOW")
+            disabled = None
+            try:
+                disabled = window.attributes("-disabled")
+                window.attributes("-disabled", True)
+            except tk.TclError:
+                pass
+            blocked.append((window, previous_close, busy_close, disabled))
+        dialog.wait_visibility()
+        dialog.grab_set()
+        cancel_button.focus_set()
+        threading.Thread(target=calculate, daemon=True, name="RD calculation").start()
+        timer = dialog.after(0, poll)
+        parent.wait_window(dialog)
+    finally:
+        if not finished.is_set():
+            cancelled.set()
+        if timer is not None:
+            try:
+                dialog.after_cancel(timer)
+            except tk.TclError:
+                pass
+        for window, previous_close, busy_close, disabled in blocked:
+            try:
+                if disabled is not None:
+                    window.attributes("-disabled", disabled)
+                window.protocol("WM_DELETE_WINDOW", previous_close)
+                window.deletecommand(busy_close)
+            except tk.TclError:
+                pass
+        if dialog.winfo_exists():
+            dialog.destroy()
+        root._calculation_active = False
+        if previous_grab is not None and previous_grab.winfo_exists():
+            previous_grab.grab_set()
+        if previous_focus is not None and previous_focus.winfo_exists():
+            previous_focus.focus_set()
+    if "error" in state:
+        raise state["error"]
+    if cancelled.is_set() or not finished.is_set() or "result" not in state:
+        raise CalculationCancelled("Calculation cancelled.")
+    return state["result"]
+
+
+def _prepare_analysis(datasets, progress=None):
+    prepared = {}
+    for index, dataset in enumerate(datasets):
+        report = _progress_span(progress, index / len(datasets), (index + 1) / len(datasets))
+        _report_progress(report, 0, f"Clinical evaluation: {dataset.get('name') or 'Prescriptions set'}")
+        prepared[index] = dataset.get("analysis") or build_analysis(dataset, progress=report)
+        _report_progress(report, 1, "Analysis ready")
+    return prepared
+
+
 def configure_desktop_style(root):
     """Apply the desktop palette without changing exported plot styles."""
     from tkinter import font, ttk
@@ -2660,6 +2889,12 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
     datasets = (
         result["sets"] if "sets" in result else [{"name": "Prescriptions set", "result": result}]
     )
+    try:
+        cache = (_prepare_analysis(datasets) if all("analysis" in ds for ds in datasets)
+                 else run_with_progress(parent, "Clinical evaluation",
+                                        lambda report: _prepare_analysis(datasets, report)))
+    except CalculationCancelled:
+        return None
     embedded = container is not None
     window = parent.winfo_toplevel() if embedded else tk.Toplevel(parent)
     if not embedded:
@@ -2710,12 +2945,8 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
     show_labels = tk.BooleanVar(value=True)
     show_ci = tk.BooleanVar(value=True)
     reference_var = tk.StringVar()
-    cache = {}
-
     def current():
         index = selector.current()
-        if index not in cache:
-            cache[index] = build_analysis(datasets[index])
         return cache[index]
 
     def options():
@@ -2938,14 +3169,15 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
             values = [float(v.strip()) for v in ab_values.get().split(",") if v.strip()]
             if not values:
                 raise ValueError("Enter at least one positive finite α/β value for q ≥ 0.")
-            window.configure(cursor="watch")
-            window.update_idletasks()
-            run_robustness(current(), values)
+            detail = current()
+            robust = run_with_progress(window, "Robustness analysis",
+                                       lambda report: run_robustness(dict(detail), values, report))
+            detail["robustness"] = robust
             refresh_robustness()
+        except CalculationCancelled:
+            robust_note.set("Robustness calculation cancelled. Previous results are unchanged.")
         except Exception as exc:
             messagebox.showerror("Robustness analysis", str(exc), parent=window)
-        finally:
-            window.configure(cursor="")
 
     ttk.Button(robust_controls, text="Run robustness", command=calculate_robustness).pack(
         side="left", padx=5
@@ -2990,20 +3222,29 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
             if not folder:
                 return
             try:
-                indices = (
+                indices = list(
                     range(len(datasets))
                     if scope.get() == "All optimized sets"
                     else [selector.current()]
                 )
                 paths = []
-                window.configure(cursor="watch")
-                window.update_idletasks()
+                if with_robust.get():
+                    def calculate_all(report):
+                        prepared = {}
+                        for position, index in enumerate(indices):
+                            detail = dict(cache[index])
+                            part = _progress_span(report, position / len(indices),
+                                                  (position + 1) / len(indices))
+                            if detail["robustness"] is None:
+                                run_robustness(detail, progress=part)
+                            _report_progress(part, 1, "Robustness ready for export")
+                            prepared[index] = detail
+                        return prepared
+
+                    prepared = run_with_progress(dialog, "Preparing robustness export", calculate_all)
+                    cache.update(prepared)
                 for index in indices:
-                    if index not in cache:
-                        cache[index] = build_analysis(datasets[index])
                     detail = cache[index]
-                    if with_robust.get() and detail["robustness"] is None:
-                        run_robustness(detail)
                     paths += export_analysis_tables(
                         detail, folder, {"LaTeX": "tex"}.get(fmt.get(), fmt.get().lower())
                     )
@@ -3019,10 +3260,10 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
                 messagebox.showinfo(
                     "Analysis exported", f"Saved {len(paths)} file(s) to {folder}", parent=window
                 )
+            except CalculationCancelled:
+                return
             except Exception as exc:
                 messagebox.showerror("Export error", str(exc), parent=dialog)
-            finally:
-                window.configure(cursor="")
 
         ttk.Button(body, text="Cancel", command=dialog.destroy).grid(row=4, column=0, pady=(12, 0))
         ttk.Button(body, text="Choose folder and export…", command=save_tables).grid(
@@ -4242,14 +4483,19 @@ def launch_gui(db_path=None):
             )
             if method is None:
                 raise ValueError("Select a valid RD EQD2 minimization criterion.")
-            res = analyze_selected(
-                checked,
-                float(var_start.get()),
-                float(var_end.get()),
-                float(var_step.get()),
-                method=method,
-                bound_pct=float(var_bound_pct.get()),
-            )
+            start, stop, step = float(var_start.get()), float(var_end.get()), float(var_step.get())
+            tolerance = float(var_bound_pct.get())
+
+            def calculate(report):
+                result = analyze_selected(checked, start, stop, step, method=method,
+                                          bound_pct=tolerance,
+                                          progress=_progress_span(report, 0, .75))
+                details = _prepare_analysis(result["sets"], _progress_span(report, .75, 1))
+                for index, dataset in enumerate(result["sets"]):
+                    dataset["analysis"] = details[index]
+                return result
+
+            res = run_with_progress(root, "Minimizing and evaluating prescriptions", calculate)
             results_table.heading(
                 "bounds",
                 text=f"{res['bound_pct']:g}% {'range' if method == 'range' else 'SD'} bounds (Gy)",
@@ -4313,6 +4559,9 @@ def launch_gui(db_path=None):
             canvas.draw()
             sync_action_states()
             workspace_tabs.select(results_area)
+        except CalculationCancelled:
+            status.set("Optimization cancelled. No partial results were applied.")
+            sync_action_states()
         except Exception as exc:
             invalidate_result()
             status.set("Optimization failed. Review the inputs and run again.")
