@@ -164,6 +164,21 @@ rd-eqd2-optimizer --batch --set "Prostate — 10 prescriptions" --out results/sa
 
 The built-in and saved-set commands use their respective α/β values unless `--ab` overrides them. A CSV uses its `alpha_beta` value when provided and defaults to 1.5 Gy otherwise. Choose `--method sse`, `--method sd`, or `--method range` to set the objective. Batch mode writes the optimization grid, prescription values, and profile image. Use the GUI for clinical evaluation and robustness exports. Run `rd-eqd2-optimizer --help` for all options.
 
+### Python prescription objects
+
+Each `Prescription` contains its name, total dose, fraction count, and optional observed local tumor control. The outcome stays with the prescription through editing, selection, SQLite storage, analysis, and CSV export.
+
+```python
+from dataclasses import replace
+from rd_eqd2_optimizer import Prescription
+
+prescription = Prescription("Fuller SBRT", 38, 4, local_control_pct=99.0)
+renamed = replace(prescription, name="Renamed prescription")
+print(renamed.dose_per_fraction_gy)  # 9.5
+```
+
+Use `None` for an unknown outcome; 0 and 100 are valid observed percentages. Objects validate their fields when created. Calculation and storage functions also accept three-value rows `(name, total_gy, fractions)` with an unknown outcome, or four-value rows including `local_control_pct`, and normalize them to prescription objects. The batch `optimal_schedules.csv` includes the outcome alongside the physical prescription and calculated EQD2.
+
 ## Saved data
 
 The app stores its data under `%USERPROFILE%\.rd_dq_optimizer` on Windows and `~/.rd_dq_optimizer` on macOS and Linux. The Python application and desktop downloads share these paths for the same user account.

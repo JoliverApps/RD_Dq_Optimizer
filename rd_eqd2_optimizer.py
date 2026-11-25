@@ -17,7 +17,9 @@ import os
 import re
 import sqlite3
 import unicodedata
+from collections.abc import Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -78,42 +80,88 @@ def EQD2_FN(ab, q, d, n):
     return result.item() if result.ndim == 0 else result
 
 
-# Established localized prostate-cancer prescriptions.
-# EQD2 is always recalculated from D, n and alpha/beta, not stored as a fixed input.
+def validated_local_control(value):
+    """Read an optional observed percentage, keeping both 0 and 100 valid."""
+    if value is None or isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, str):
+        value = value.strip().removesuffix("%")
+    message = "Local tumor control must be a percentage from 0 to 100, or left blank."
+    try:
+        percent = float(value)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(message) from exc
+    if not 0 <= percent <= 100:
+        raise ValueError(message)
+    return percent
+
+
+@dataclass(frozen=True, slots=True)
+class Prescription:
+    """One prescription and its optional observed local tumor control percentage."""
+
+    name: str
+    total_gy: float
+    fractions: int
+    local_control_pct: float | None = None
+
+    def __post_init__(self):
+        name = str(self.name).strip()
+        try:
+            total, fractions = float(self.total_gy), float(self.fractions)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ValueError("D must be positive and n must be a positive integer.") from exc
+        if (not name or not math.isfinite(total) or total <= 0
+                or not math.isfinite(fractions) or fractions <= 0 or not fractions.is_integer()):
+            raise ValueError("A prescription needs a name, positive dose, and positive integer fractions.")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "total_gy", total)
+        object.__setattr__(self, "fractions", int(fractions))
+        object.__setattr__(self, "local_control_pct", validated_local_control(self.local_control_pct))
+
+    @property
+    def dose_per_fraction_gy(self):
+        return self.total_gy / self.fractions
+
+    @property
+    def schedule_key(self):
+        """Physical identity used by set selections and reference choices."""
+        return self.name, self.total_gy, self.fractions
+
+    @classmethod
+    def from_value(cls, value):
+        """Accept inline records and legacy three-value calculation inputs."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, Mapping):
+            return cls(value["name"], value["total_gy"], value["fractions"],
+                       value.get("local_control_pct"))
+        if isinstance(value, (tuple, list)) and len(value) in (3, 4):
+            return cls(*value)
+        raise ValueError("Use a Prescription, a field mapping, or a three/four-value row.")
+
+
 PROSTATE_SET_NAME = "Prostate — 10 prescriptions"
 PROSTATE_ALPHA_BETA = 1.5
-# All doses are nominal prescription inputs; EQD2 is calculated at run time.
-PROSTATE_PRESCRIPTIONS = [
-    ("Shared conventional reference", 78.00, 39),
-    ("RTOG 0126 IMRT", 79.20, 44),
-    ("GETUG 06", 80.00, 40),
-    ("RTOG 0415 conventional", 73.80, 41),
-    ("RTOG 0415 hypofractionated", 70.00, 28),
-    ("PROFIT hypofractionated", 60.00, 20),
-    ("PACE-B control", 62.00, 20),
-    ("Mantz SBRT", 40.00, 5),
-    ("HYPO-RT-PC ultrahypofractionated", 42.70, 7),
-    ("Fuller SBRT", 38.00, 4),
-]
-# Observed outcomes supplied in prostate_clinical_outcomes.csv.
-PROSTATE_LOCAL_CONTROL_PCT = {
-    "Shared conventional reference": 91.6,
-    "RTOG 0126 IMRT": 97.0,
-    "RTOG 0415 conventional": 95.3,
-    "RTOG 0415 hypofractionated": 99.4,
-    "PROFIT hypofractionated": 86.92307692307692,
-    "Fuller SBRT": 99.0,
+# Each row carries its own outcome; None means no observed outcome is supplied.
+PROSTATE_SET = {
+    "name": PROSTATE_SET_NAME,
+    "alpha_beta": PROSTATE_ALPHA_BETA,
+    "prescriptions": [
+        Prescription("Shared conventional reference", 78.00, 39, 91.6),
+        Prescription("RTOG 0126 IMRT", 79.20, 44, 97.0),
+        Prescription("GETUG 06", 80.00, 40),
+        Prescription("RTOG 0415 conventional", 73.80, 41, 95.3),
+        Prescription("RTOG 0415 hypofractionated", 70.00, 28, 99.4),
+        Prescription("PROFIT hypofractionated", 60.00, 20, 86.92307692307692),
+        Prescription("PACE-B control", 62.00, 20),
+        Prescription("Mantz SBRT", 40.00, 5),
+        Prescription("HYPO-RT-PC ultrahypofractionated", 42.70, 7),
+        Prescription("Fuller SBRT", 38.00, 4, 99.0),
+    ],
 }
 DEFAULT_Q_START, DEFAULT_Q_END, DEFAULT_Q_STEP = -50.0, 50.0, 0.001
-
-# Prescription sets available on first launch.
-DEFAULT_SETS = {
-    PROSTATE_SET_NAME: {
-        "alpha_beta": PROSTATE_ALPHA_BETA,
-        "prescriptions": PROSTATE_PRESCRIPTIONS,
-        "local_control_pct": PROSTATE_LOCAL_CONTROL_PCT,
-    },
-}
+DEFAULT_SETS = {PROSTATE_SET_NAME: PROSTATE_SET}
 # Self-contained, SQLite-backed one-to-many prescription storage.
 DEFAULT_DB_PATH = Path(
     os.environ.get("RD_DQ_DB_PATH", Path.home() / ".rd_dq_optimizer" / "prescriptions.sqlite3")
@@ -204,15 +252,15 @@ class PrescriptionStore:
                     (prostate["id"],),
                 )
             ]
-            if rows == PROSTATE_PRESCRIPTIONS:
+            if rows == [p.schedule_key for p in PROSTATE_SET["prescriptions"]]:
                 con.executemany(
                     "UPDATE prescriptions SET local_control_pct=? "
                     "WHERE tumor_id=? AND name=? AND total_gy=? AND fractions=? "
                     "AND local_control_pct IS NULL",
                     [
-                        (PROSTATE_LOCAL_CONTROL_PCT[name], prostate["id"], name, dose, fractions)
-                        for name, dose, fractions in PROSTATE_PRESCRIPTIONS
-                        if name in PROSTATE_LOCAL_CONTROL_PCT
+                        (p.local_control_pct, prostate["id"], *p.schedule_key)
+                        for p in PROSTATE_SET["prescriptions"]
+                        if p.local_control_pct is not None
                     ],
                 )
         con.execute("INSERT INTO metadata(key,value) VALUES (?, '1')", (marker,))
@@ -223,7 +271,8 @@ class PrescriptionStore:
             (name, validated_alpha_beta(dataset["alpha_beta"])),
         )
         reference = dataset.get("reference_prescription")
-        controls = dataset.get("local_control_pct", {})
+        rows = validate_schedules(dataset["prescriptions"])
+        reference_key = Prescription.from_value(reference).schedule_key if reference is not None else None
         con.executemany(
             "INSERT INTO prescriptions "
             "(tumor_id,name,total_gy,fractions,position,is_reference,local_control_pct) "
@@ -231,14 +280,14 @@ class PrescriptionStore:
             [
                 (
                     cursor.lastrowid,
-                    str(label),
-                    float(dose),
-                    int(fractions),
+                    p.name,
+                    p.total_gy,
+                    p.fractions,
                     position,
-                    int((label, dose, fractions) == reference),
-                    validated_local_control(controls.get(label)),
+                    int(p.schedule_key == reference_key),
+                    p.local_control_pct,
                 )
-                for position, (label, dose, fractions) in enumerate(dataset["prescriptions"])
+                for position, p in enumerate(rows)
             ],
         )
 
@@ -279,7 +328,7 @@ class PrescriptionStore:
             "INSERT INTO prescriptions(tumor_id,name,total_gy,fractions,position) "
             "VALUES (?,?,?,?,?) "
             "ON CONFLICT(tumor_id,name) DO UPDATE SET position=excluded.position",
-            [(set_id, *row, position) for position, row in enumerate(PROSTATE_PRESCRIPTIONS)],
+            [(set_id, *p.schedule_key, position) for position, p in enumerate(PROSTATE_SET["prescriptions"])],
         )
 
     def list_sets(self):
@@ -305,7 +354,8 @@ class PrescriptionStore:
                 (set_id,),
             ).fetchall()
             data["prescriptions"] = [
-                (r["name"], r["total_gy"], r["fractions"]) for r in prescriptions
+                Prescription(r["name"], r["total_gy"], r["fractions"], r["local_control_pct"])
+                for r in prescriptions
             ]
             data["reference_prescription"] = next(
                 (
@@ -315,11 +365,6 @@ class PrescriptionStore:
                 ),
                 None,
             )
-            data["local_control_pct"] = {
-                row["name"]: row["local_control_pct"]
-                for row in prescriptions
-                if row["local_control_pct"] is not None
-            }
             return data
 
     def find_set(self, name):
@@ -334,7 +379,6 @@ class PrescriptionStore:
         prescriptions,
         set_id=None,
         reference_prescription=None,
-        local_control_pct=None,
     ):
         name = str(name).strip()
         if not name:
@@ -344,21 +388,13 @@ class PrescriptionStore:
         ab = validated_alpha_beta(alpha_beta)
         rows = validate_schedules(prescriptions)
         if reference_prescription is not None:
-            reference_prescription = validate_schedules([reference_prescription, rows[0]])[0]
-            if reference_prescription not in rows:
-                raise ValueError(
-                    "The reference prescription must belong to this prescriptions set."
-                )
-        labels = [row[0].casefold() for row in rows]
+            reference_key = Prescription.from_value(reference_prescription).schedule_key
+            reference_prescription = next((p for p in rows if p.schedule_key == reference_key), None)
+            if reference_prescription is None:
+                raise ValueError("The reference prescription must belong to this prescriptions set.")
+        labels = [p.name.casefold() for p in rows]
         if len(labels) != len(set(labels)):
             raise ValueError("Each prescription name must be unique within a prescriptions set.")
-        controls = {}
-        if local_control_pct is not None:
-            if not set(local_control_pct).issubset(row[0] for row in rows):
-                raise ValueError("Local tumor control must refer to a prescription in this set.")
-            controls = {
-                row: validated_local_control(local_control_pct.get(row[0])) for row in rows
-            }
         with self._connection() as con:
             try:
                 if set_id is None:
@@ -372,22 +408,13 @@ class PrescriptionStore:
                     )
                     if not cur.rowcount:
                         raise KeyError(f"Prescriptions set {set_id} does not exist.")
-                    if local_control_pct is None:
-                        controls = {
-                            (p["name"], p["total_gy"], p["fractions"]): p["local_control_pct"]
-                            for p in con.execute(
-                                "SELECT name,total_gy,fractions,local_control_pct "
-                                "FROM prescriptions WHERE tumor_id=?",
-                                (set_id,),
-                            )
-                        }
                     con.execute("DELETE FROM prescriptions WHERE tumor_id=?", (set_id,))
                 con.executemany(
                     "INSERT INTO prescriptions "
                     "(tumor_id,name,total_gy,fractions,position,is_reference,local_control_pct) "
                     "VALUES (?,?,?,?,?,?,?)",
                     [
-                        (set_id, *row, i, int(row == reference_prescription), controls.get(row))
+                        (set_id, *row.schedule_key, i, int(row == reference_prescription), row.local_control_pct)
                         for i, row in enumerate(rows)
                     ],
                 )
@@ -422,33 +449,16 @@ def validated_alpha_beta(value):
     return ab
 
 
-def validated_local_control(value):
-    """Read an optional observed percentage, keeping both 0 and 100 valid."""
-    if value is None or isinstance(value, str) and not value.strip():
-        return None
-    if isinstance(value, str):
-        value = value.strip().removesuffix("%")
-    message = "Local tumor control must be a percentage from 0 to 100, or left blank."
-    try:
-        percent = float(value)
-    except (ValueError, TypeError) as exc:
-        raise ValueError(message) from exc
-    if not 0 <= percent <= 100:
-        raise ValueError(message)
-    return percent
-
-
 def reference_schedule(record):
-    """Use the saved choice, or the first 2 Gy/fraction prescription in set order."""
+    """Resolve the chosen reference by physical identity, including outside a fitted subset."""
+    rows = [Prescription.from_value(row) for row in record["prescriptions"]]
     reference = record.get("reference_prescription")
     if reference is not None:
-        return tuple(reference)
+        reference = Prescription.from_value(reference)
+        return next((p for p in rows if p.schedule_key == reference.schedule_key), reference)
     return next(
-        (
-            tuple(row)
-            for row in record["prescriptions"]
-            if math.isclose(row[1] / row[2], REFERENCE_DOSE_GY, rel_tol=0, abs_tol=1e-10)
-        ),
+        (p for p in rows if math.isclose(p.dose_per_fraction_gy, REFERENCE_DOSE_GY,
+                                       rel_tol=0, abs_tol=1e-10)),
         None,
     )
 
@@ -470,7 +480,9 @@ class PrescriptionsSelection:
             key = str(record["id"])
             previous = self.included.get(key, {})
             self.included[key] = {
-                tuple(row): previous.get(tuple(row), True) for row in record["prescriptions"]
+                Prescription.from_value(row).schedule_key:
+                    previous.get(Prescription.from_value(row).schedule_key, True)
+                for row in record["prescriptions"]
             }
             ab = record["alpha_beta"]
             if key not in self.alpha_beta_text or self._saved_alpha_beta.get(key) != ab:
@@ -478,11 +490,11 @@ class PrescriptionsSelection:
             self._saved_alpha_beta[key] = ab
 
     def is_included(self, record, index):
-        return self.included[str(record["id"])][tuple(record["prescriptions"][index])]
+        return self.included[str(record["id"])][Prescription.from_value(record["prescriptions"][index]).schedule_key]
 
     def set_included(self, record, indices, value):
         for index in indices:
-            self.included[str(record["id"])][tuple(record["prescriptions"][index])] = bool(value)
+            self.included[str(record["id"])][Prescription.from_value(record["prescriptions"][index]).schedule_key] = bool(value)
 
     def selected_rows(self, record):
         return [
@@ -508,31 +520,10 @@ class PrescriptionsSelection:
 
 
 def validate_schedules(schedules):
-    if len(schedules) < 2:
+    rows = [Prescription.from_value(row) for row in schedules]
+    if len(rows) < 2:
         raise ValueError("Select or enter at least two prescriptions.")
-    out = []
-    for entry in schedules:
-        if len(entry) != 3:
-            raise ValueError("Each prescription needs a name, total dose D, and fractions n.")
-        name, total, fx = entry
-        name = str(name).strip()
-        try:
-            total = float(total)
-            f = float(fx)
-        except (ValueError, TypeError) as exc:
-            raise ValueError("D must be positive and n must be a positive integer.") from exc
-        if (
-            not name
-            or not all(math.isfinite(x) for x in (total, f))
-            or total <= 0
-            or f <= 0
-            or not f.is_integer()
-        ):
-            raise ValueError(
-                f"Invalid schedule: {(name, total, fx)}. Fractions must be a positive integer."
-            )
-        out.append((name, total, int(f)))
-    return out
+    return rows
 
 
 def _branch_alpha_beta(ab, q):
@@ -645,8 +636,8 @@ def fraction_bed(ab, qgrid, doses):
 def evaluate(ab, qgrid, schedules):
     schedules = validate_schedules(schedules)
     qgrid = np.atleast_1d(np.asarray(qgrid, dtype=float))
-    d = np.array([total / n for _, total, n in schedules], dtype=float)
-    n = np.array([n for _, total, n in schedules], dtype=float)
+    d = np.array([p.dose_per_fraction_gy for p in schedules], dtype=float)
+    n = np.array([p.fractions for p in schedules], dtype=float)
     return EQD2_FN(ab, qgrid[:, None], d[None, :], n[None, :])
 
 
@@ -1013,7 +1004,7 @@ def analyze(ab, start, stop, step, schedules, method="sse", bound_pct=5.0):
         upper=float(q[-1]),
         profile=(q, statistics["spread"] if method == "range" else sample_sd),
     )
-    fraction_doses = np.array([total / fx for _, total, fx in schedules])
+    fraction_doses = np.array([p.dose_per_fraction_gy for p in schedules])
     centered_doses = fraction_doses - fraction_doses.mean()
     dose_variation = float(np.sum(centered_doses**2))
     slope = (
@@ -1064,10 +1055,6 @@ def analyze_selected(selections, start, stop, step, method="sse", bound_pct=5.0)
             bound_pct=bound_pct,
         )
         res["reference_prescription"] = reference_schedule(record)
-        controls = record.get("local_control_pct", {})
-        res["local_control_pct"] = {
-            label: controls[label] for label, _, _ in res["schedules"] if label in controls
-        }
         result_sets.append({"name": record["name"], "id": record.get("id"), "result": res})
     return {"method": method, "bound_pct": float(bound_pct), "sets": result_sets}
 
@@ -1084,7 +1071,7 @@ def export(result, folder):
         w = csv.writer(fp)
         if not multi or len(datasets) == 1:
             r = datasets[0]["result"]
-            names = [x[0] for x in r["schedules"]]
+            names = [p.name for p in r["schedules"]]
             w.writerow(
                 ["Dq_Gy", "mean_EQD2_Gy", "population_SD_Gy", "range_Gy"]
                 + [f"EQD2_{name}_Gy" for name in names]
@@ -1107,7 +1094,7 @@ def export(result, folder):
                     f"{name}: SSE_Gy2",
                     f"{name}: range_Gy",
                 ]
-                header += [f"{name}: EQD2_{row[0]}_Gy" for row in dataset["result"]["schedules"]]
+                header += [f"{name}: EQD2_{row.name}_Gy" for row in dataset["result"]["schedules"]]
             w.writerow(header)
             # Each set has its own refined minimum. Evaluate all curves on the
             # union of candidate grids, rather than pairing unequal row indices.
@@ -1147,17 +1134,18 @@ def export(result, folder):
                     "fractions",
                     "dose_per_fraction_Gy",
                     "optimal_EQD2_Gy",
+                    "local_control_pct",
                 ]
             )
         else:
             w.writerow(
-                ["schedule", "total_Gy", "fractions", "dose_per_fraction_Gy", "optimal_EQD2_Gy"]
+                ["schedule", "total_Gy", "fractions", "dose_per_fraction_Gy", "optimal_EQD2_Gy", "local_control_pct"]
             )
         for dataset in datasets:
             r = dataset["result"]
             i = r["idx"]
-            for (name, total, n), value in zip(r["schedules"], r["eqd2"][i]):
-                values = [name, total, n, total / n, value]
+            for p, value in zip(r["schedules"], r["eqd2"][i]):
+                values = [p.name, p.total_gy, p.fractions, p.dose_per_fraction_gy, value, p.local_control_pct]
                 if multi and len(datasets) > 1:
                     values = [dataset["name"], r["signed_ab"], r["method"], r["q"][i]] + values
                 w.writerow(values)
@@ -1298,7 +1286,6 @@ def read_prescriptions_set_csv(path):
         return aliases.get(re.sub(r"[\s/()\-]+", "_", value).strip("_"), value)
 
     schedules, set_names, alpha_betas, references = [], [], [], []
-    controls = {}
     try:
         with open(path, encoding="utf-8-sig", newline="") as fp:
             sample = fp.read(8192)
@@ -1349,13 +1336,11 @@ def read_prescriptions_set_csv(path):
                     raise ValueError(
                         f"CSV line {line}: total dose must be positive and fractions a positive integer."
                     )
-                schedules.append((label, total, int(fx)))
                 try:
-                    control = validated_local_control(row.get("local_control_pct"))
+                    prescription = Prescription(label, total, int(fx), row.get("local_control_pct"))
                 except ValueError as exc:
                     raise ValueError(f"CSV line {line}: {exc}") from exc
-                if control is not None:
-                    controls[label] = control
+                schedules.append(prescription)
                 flag = (row.get("is_reference") or "").strip().casefold()
                 if flag not in ("", "0", "false", "no", "1", "true", "yes"):
                     raise ValueError(f"CSV line {line}: is_reference must be 0 or 1.")
@@ -1380,7 +1365,7 @@ def read_prescriptions_set_csv(path):
     except (csv.Error, UnicodeError) as exc:
         raise ValueError(f"Cannot read CSV. Use UTF-8 text with a header row: {exc}") from exc
     schedules = validate_schedules(schedules)
-    if len({label.casefold() for label, _, _ in schedules}) != len(schedules):
+    if len({p.name.casefold() for p in schedules}) != len(schedules):
         raise ValueError("CSV prescription names must be unique within the prescriptions set.")
     if len(references) > 1:
         raise ValueError("Choose only one reference prescription per prescriptions set.")
@@ -1399,7 +1384,6 @@ def read_prescriptions_set_csv(path):
         "alpha_beta": alpha_betas[0] if alpha_betas else None,
         "prescriptions": schedules,
         "reference_prescription": references[0] if references else None,
-        "local_control_pct": controls,
     }
 
 
@@ -1410,8 +1394,6 @@ def export_prescriptions_set(record, filename):
         raise ValueError("Prescriptions set name is required.")
     ab = validated_alpha_beta(record["alpha_beta"])
     rows = validate_schedules(record["prescriptions"])
-    controls = record.get("local_control_pct", {})
-    controls = {label: validated_local_control(controls.get(label)) for label, _, _ in rows}
     path = Path(filename)
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
@@ -1422,9 +1404,10 @@ def export_prescriptions_set(record, filename):
             ]
         )
         reference = record.get("reference_prescription")
-        for label, total, fractions in rows:
-            is_reference = reference is not None and (label, total, fractions) == tuple(reference)
-            writer.writerow([label, total, fractions, name, ab, int(is_reference), controls[label]])
+        reference_key = Prescription.from_value(reference).schedule_key if reference is not None else None
+        for p in rows:
+            writer.writerow([p.name, p.total_gy, p.fractions, name, ab,
+                             int(p.schedule_key == reference_key), p.local_control_pct])
     return path
 
 
@@ -1712,11 +1695,11 @@ def build_analysis(dataset):
     reserves, rates = rd_parameters(input_ab, np.array([dq]))
     reserve = float(reserves[0])
     s = float(rates[0]) if dq != 0 else None
-    beds = fraction_bed(input_ab, [dq], [total / n for _, total, n in r["schedules"]])[0]
-    controls = r.get("local_control_pct", {})
+    beds = fraction_bed(input_ab, [dq], [p.dose_per_fraction_gy for p in r["schedules"]])[0]
     prescriptions = []
-    for (name, total, n), eqd2, per_fraction_bed in zip(r["schedules"], r["eqd2"][i], beds):
-        d = total / n
+    for p, eqd2, per_fraction_bed in zip(r["schedules"], r["eqd2"][i], beds):
+        name, total, n = p.schedule_key
+        d = p.dose_per_fraction_gy
         bed = n * per_fraction_bed
         lq_bed = total * (1 + d / ab)
         lq_eqd2 = total * (ab + d) / (ab + REFERENCE_DOSE_GY) if ab != -REFERENCE_DOSE_GY else None
@@ -1730,7 +1713,7 @@ def build_analysis(dataset):
                 "RD_EQD2_Gy": float(eqd2),
                 "LQ_BED_Gy": lq_bed,
                 "LQ_EQD2_Gy": lq_eqd2,
-                "local_control_pct": controls.get(name),
+                "local_control_pct": p.local_control_pct,
                 "RD_deviation_Gy": float(eqd2 - r["mean"][i]),
                 "RD_minus_LQ_Gy": float(eqd2 - lq_eqd2) if lq_eqd2 is not None else None,
             }
@@ -1751,8 +1734,8 @@ def build_analysis(dataset):
     )
     reference = None
     if reference_row is not None:
-        _, total, fractions = reference_row
-        reference = float(EQD2_FN(input_ab, dq, total / fractions, fractions))
+        reference = float(EQD2_FN(input_ab, dq, reference_row.dose_per_fraction_gy,
+                                   reference_row.fractions))
     analysis = {
         "name": dataset.get("name") or "Prescriptions set",
         "alpha_beta": ab,
@@ -1997,7 +1980,7 @@ def analysis_summary(a):
         ("Prescriptions (N)", rd["N"]),
         (
             "Reference prescription",
-            a["reference_prescription"][0] if a["reference_prescription"] else "N/A",
+            a["reference_prescription"].name if a["reference_prescription"] else "N/A",
         ),
         ("Reference EQD2 (Gy)", a["reference"]),
         ("Selected α/β (Gy)", a["alpha_beta"]),
@@ -2063,7 +2046,7 @@ def run_robustness(a, alpha_beta_values=None):
             )
             detail = build_analysis({"name": a["name"], "result": fitted})
             dq = detail["D_q"]
-            name, total, n = rows[omitted]
+            name, total, n = rows[omitted].schedule_key
             e = float(evaluate(a["input_alpha_beta"], np.array([dq]), rows)[0, omitted])
             held_out.append(
                 {
@@ -2100,7 +2083,7 @@ def run_robustness(a, alpha_beta_values=None):
         )
     # Horizontal-trend calibration uses the same search interval as the optimization.
     grid = r["q"]
-    doses = np.array([total / n for _, total, n in rows])
+    doses = np.array([p.dose_per_fraction_gy for p in rows])
     centered = doses - doses.mean()
     flat = None
     if float(centered @ centered) > 0:
@@ -3662,9 +3645,10 @@ def launch_gui(db_path=None):
         selected = tree.selection()
         visible = tree.yview()[0]
         tree.delete(*tree.get_children())
-        for index, (name, total, fx) in enumerate(full["prescriptions"]):
+        for index, prescription in enumerate(full["prescriptions"]):
+            name, total, fx = prescription.schedule_key
             checked = selections.is_included(full, index)
-            control = full["local_control_pct"].get(name)
+            control = prescription.local_control_pct
             tree.insert(
                 "",
                 "end",
@@ -3676,7 +3660,7 @@ def launch_gui(db_path=None):
                     f"{total:g}",
                     fx,
                     f"{total / fx:.4g}",
-                    "Yes" if (name, total, fx) == reference_schedule(full) else "",
+                    "Yes" if prescription == reference_schedule(full) else "",
                     f"{control:.4g}%" if control is not None else "",
                 ),
             )
@@ -3684,7 +3668,7 @@ def launch_gui(db_path=None):
         tree.yview_moveto(visible)
         view["summary"].set(
             f"{len(selections.selected_rows(full))} of {len(full['prescriptions'])} prescriptions selected · "
-            f"{len(full['local_control_pct'])} observed outcomes"
+            f"{sum(p.local_control_pct is not None for p in full['prescriptions'])} observed outcomes"
         )
         refresh_set_label(key)
 
@@ -4074,11 +4058,19 @@ def launch_gui(db_path=None):
             rows.append(row)
             sc_canvas.yview_moveto(1.0)
 
-        previous = draft.get("prescriptions", [("", "", ""), ("", "", "")])
-        for label, total, fractions in previous:
-            add_row(label, total, fractions, draft.get("local_control_pct", {}).get(label))
-            if (label, total, fractions) == draft.get("reference_prescription"):
-                reference_choice.set(rows[-1]["id"])
+        previous = draft.get("prescriptions")
+        if previous:
+            chosen_reference = draft.get("reference_prescription")
+            reference_key = (Prescription.from_value(chosen_reference).schedule_key
+                             if chosen_reference is not None else None)
+            for prescription in previous:
+                add_row(prescription.name, prescription.total_gy, prescription.fractions,
+                        prescription.local_control_pct)
+                if prescription.schedule_key == reference_key:
+                    reference_choice.set(rows[-1]["id"])
+        else:
+            add_row()
+            add_row()
 
         actions = ttk.Frame(body)
         actions.pack(fill="x", pady=3)
@@ -4101,7 +4093,6 @@ def launch_gui(db_path=None):
                 ab_bad = True
             mark(ab_entry, ab_bad)
             saved_rows = []
-            controls = {}
             bad_controls = False
             for row in rows:
                 variables = row["values"]
@@ -4119,13 +4110,15 @@ def launch_gui(db_path=None):
                     bad_n = True
                 mark(row["entries"][1], bad_total)
                 mark(row["entries"][2], bad_n)
-                saved_rows.append(values)
                 try:
-                    controls[values[0]] = validated_local_control(row["control"].get())
+                    control = validated_local_control(row["control"].get())
                     mark(row["control_entry"], False)
                 except ValueError:
                     mark(row["control_entry"], True)
                     bad_controls = True
+                    control = None
+                if valid:
+                    saved_rows.append(Prescription(*values, control))
             if not valid:
                 messagebox.showerror(
                     "Prescription inputs",
@@ -4149,7 +4142,6 @@ def launch_gui(db_path=None):
                         ),
                         None,
                     ),
-                    local_control_pct=controls,
                 )
             except (ValueError, KeyError) as exc:
                 messagebox.showerror("Cannot save prescriptions set", str(exc), parent=dialog)
@@ -4598,7 +4590,7 @@ def main():
                 else a.ab
             )
         else:
-            data = PROSTATE_PRESCRIPTIONS
+            data = PROSTATE_SET["prescriptions"]
             reference_record = DEFAULT_SETS[PROSTATE_SET_NAME]
             ab = PROSTATE_ALPHA_BETA if a.ab is None else a.ab
     result = analyze(
@@ -4606,7 +4598,6 @@ def main():
     )
     result["plot_settings"] = normalized_plot_settings({"title": a.plot_title or ""})
     result["reference_prescription"] = reference_schedule(reference_record)
-    result["local_control_pct"] = reference_record.get("local_control_pct", {})
     export(result, a.out)
     i = result["idx"]
     print("Symbolic formula:", EQD2_EXPR)
@@ -4620,7 +4611,8 @@ def main():
     )
     if i in (0, len(result["q"]) - 1):
         print("WARNING: optimum is on grid boundary.")
-    for (name, total, fx), eq in zip(result["schedules"], result["eqd2"][i]):
+    for prescription, eq in zip(result["schedules"], result["eqd2"][i]):
+        name, total, fx = prescription.schedule_key
         print(f"{name:32} {total:g} Gy/{fx} fx  -> {eq:.3f} Gy EQD2")
     print("Saved results to", a.out)
 
