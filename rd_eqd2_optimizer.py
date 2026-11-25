@@ -4502,7 +4502,17 @@ def launch_gui(db_path=None):
         root.bind(shortcut, lambda event, command=command: command())
     result_tabs.bind("<<NotebookTabChanged>>", sync_action_states, add="+")
     workspace_tabs.bind("<<NotebookTabChanged>>", sync_action_states, add="+")
-    root.after(100, lambda: sidebar.sashpos(0, max(220, int(sidebar.winfo_height() * 0.50))))
+    sidebar_initialized = False
+
+    def initialize_sidebar(_event=None):
+        nonlocal sidebar_initialized
+        if not sidebar_initialized and sidebar.winfo_height() > 100:
+            sidebar.sashpos(0, int(sidebar.winfo_height() * 0.50))
+            sidebar_initialized = True
+
+    sidebar.bind("<Map>", lambda event: root.after_idle(initialize_sidebar), add="+")
+    if sidebar.winfo_ismapped():
+        root.after_idle(initialize_sidebar)
     methods.bind("<<ComboboxSelected>>", method_changed)
     for var in (var_start, var_end, var_step, var_bound_pct):
         var.trace_add("write", invalidate_result)

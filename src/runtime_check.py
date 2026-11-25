@@ -583,6 +583,8 @@ def check_gui(app, db_path, result):
             try:
                 from unittest.mock import patch
 
+                root.update()
+
                 def button(text, parent=None):
                     from types import SimpleNamespace
 
@@ -688,9 +690,12 @@ def check_gui(app, db_path, result):
                     and isinstance(root.nametowidget(w.panes()[0]), ttk.LabelFrame)
                     and root.nametowidget(w.panes()[0]).cget("text") == "Prescription sets"
                 )
-                left_panes.sashpos(0, 300)
+                left_target = int(left_panes.winfo_height() * 0.45)
+                left_panes.sashpos(0, left_target)
                 root.update_idletasks()
-                assert abs(left_panes.sashpos(0) - 300) < 4
+                assert abs(left_panes.sashpos(0) - left_target) < 4, (
+                    left_panes.sashpos(0), left_target, left_panes.winfo_height()
+                )
                 management = [button(text) for text in ("New set", "Edit set", "Import…", "Export…")]
                 assert len({(w.winfo_width(), w.winfo_height()) for w in management}) == 1
                 result_tabs = next(
