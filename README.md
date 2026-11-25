@@ -35,13 +35,19 @@ python -m pip install numpy==2.2.6 matplotlib==3.10.3 scipy==1.17.0 sympy==1.14.
 python rd_eqd2_optimizer.py
 ```
 
+## Desktop interface
+
+The left column groups prescription sets and optimization settings. **New set**, **Edit set**, **Import…**, and **Export…** manage the selected set. The **File**, **Prescriptions**, **Analysis**, **View**, and **Help** menus provide secondary actions, including deletion and parameter guidance. Use **Export** above the result tabs for plots, tables, or combined results.
+
+The horizontal and vertical dividers resize the set list, prescription table, and results area. Buttons within each group share the same dimensions. Keyboard shortcuts: **Ctrl+N** creates a set, **Ctrl+O** imports one, **Ctrl+R** runs optimization, and **Ctrl+S** exports results and the graph.
+
 ## Run an optimization
 
 1. Select **Prostate — 10 prescriptions**, create a set, or import a CSV.
-2. In **Prescriptions in the viewed set**, check **Optimize** for at least two prescriptions per selected set.
+2. In **Prescriptions**, check **Optimize** for at least two prescriptions per selected set.
 3. Enter **α/β (Gy)** for each set. Use **Save α/β** to store the value for future sessions.
 4. Set the q search interval and step, and choose **SSE**, **SD**, or **Range**.
-5. Click **Run optimization**, then **Analysis…** to inspect the selected set.
+5. Click **Run optimization**, then use the result tabs to inspect the profile, EQD2 dispersion, clinical evaluation, and robustness. **Analysis…** opens the full analysis in a separate window.
 
 Each set is optimized independently. Switching tabs preserves the current prescription selections and α/β entries. The **Optimize** checkboxes control which saved rows take part in the current fit.
 
@@ -77,11 +83,11 @@ The results table reports Dq, the signed α/β for the fitted branch, the minimi
 
 A minimum marked **BOUNDARY** lies at a search endpoint. **Outside search** indicates that at least one profile-bound crossing lies beyond the selected interval.
 
-**Analysis…** offers five tabs for the selected optimized set.
+The main window shows four result tabs: **Optimization profile**, **EQD2 dispersion**, **Clinical evaluation**, and **Robustness**. The **Optimized set** dropdown selects the set used by the three analysis tabs. The optimization profile displays all fitted sets.\n\n**Analysis…** opens a separate window with five tabs for the selected optimized set.
 
 | Tab | Contents |
 | --- | --- |
-| **Dispersion plot** | RD and optional LQ EQD2 against dose per fraction, with a reference line and summary statistics |
+| **EQD2 dispersion** | RD and optional LQ EQD2 against dose per fraction, with a reference line and summary statistics |
 | **Clinical evaluation** | RD EQD2 against observed local tumor control, with summary statistics and a bounded beta fit when available |
 | **Prescription values** | Per-prescription RD and LQ BED and EQD2, observed local control, and dose differences |
 | **Summary & trends** | RD parameters, descriptive statistics, trend coefficients, and profile bounds |
@@ -93,7 +99,7 @@ At Dq = 0, the sensitization rate s is displayed as **N/A**. At α/β = −2 Gy,
 
 1. In **New prescriptions set** or **Edit prescriptions set**, enter **Local tumor control (%)** on each row with an observed outcome. A blank cell represents missing data. A value of 0 represents observed 0% local control. For CSV import, use `local_control_pct`.
 2. Run the optimization with the desired prescriptions. The Dq fit uses the total doses and fraction counts of all checked rows.
-3. Open **Analysis… → Clinical evaluation**. Each checked row with an outcome contributes one equally weighted point using its RD EQD2 at the fitted Dq.
+3. Select **Clinical evaluation** in the results area, or open **Analysis… → Clinical evaluation**. Each checked row with an outcome contributes one equally weighted point using its RD EQD2 at the fitted Dq.
 
 The plot and summary show means, observed minimum–maximum ranges, a linear trend, and R² where defined. A shaded rectangle marks a compact majority subgroup when the [cluster rule](MATHEMATICS.md#clinical-evaluation) is met. The summary compares the enclosing areas on the RD and LQ scales for the same observations when the ratio is defined.
 

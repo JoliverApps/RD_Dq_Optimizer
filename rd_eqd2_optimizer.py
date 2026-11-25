@@ -2562,7 +2562,50 @@ def export_clinical_plot(clinical, filename, ppi=300, **options):
     _export_analysis_plot(clinical, filename, ppi, draw_clinical_plot, (10, 6.4), **options)
 
 
-def open_analysis_window(parent, result):
+def configure_desktop_style(root):
+    """Apply the desktop palette without changing exported plot styles."""
+    from tkinter import font, ttk
+
+    family = "Segoe UI" if os.name == "nt" else "DejaVu Sans"
+    for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+        font.nametofont(name, root=root).configure(family=family, size=10)
+    style = ttk.Style(root)
+    style.theme_use("clam")
+    root.configure(background="#eef2f6")
+    style.configure(".", background="#eef2f6", foreground="#172b4d", font=(family, 10))
+    style.configure("TFrame", background="#eef2f6")
+    style.configure("TLabel", background="#eef2f6")
+    style.configure("Title.TLabel", font=(family, 21, "bold"))
+    style.configure("Subtitle.TLabel", foreground="#627088")
+    style.configure("TLabelframe", background="#ffffff", bordercolor="#cbd5e1", relief="solid")
+    style.configure("TLabelframe.Label", font=(family, 11, "bold"))
+    style.configure("TButton", width=20, padding=(10, 7), background="#f6f8fb",
+                    bordercolor="#cbd5e1", focuscolor="#0d8b84")
+    style.map("TButton", background=[("active", "#e4edf2"), ("pressed", "#d5e5eb")])
+    style.configure("Accent.TButton", background="#00877f", foreground="white",
+                    font=(family, 10, "bold"), bordercolor="#00877f")
+    style.map("Accent.TButton", background=[("active", "#006f69"), ("pressed", "#005d58")],
+              foreground=[("disabled", "#a5c9c6"), ("!disabled", "white")])
+    style.configure("TMenubutton", width=20, padding=(10, 7), background="#f6f8fb",
+                    bordercolor="#cbd5e1")
+    style.configure("TEntry", padding=6, fieldbackground="white", bordercolor="#cbd5e1")
+    style.configure("TCombobox", padding=6, fieldbackground="white", bordercolor="#cbd5e1")
+    style.map("TCombobox", fieldbackground=[("readonly", "white")],
+              foreground=[("readonly", "#172b4d")])
+    style.configure("TCheckbutton", padding=(4, 5))
+    style.configure("Treeview", rowheight=28, background="white", fieldbackground="white",
+                    bordercolor="#cbd5e1")
+    style.map("Treeview", background=[("selected", "#d4eeeb")],
+              foreground=[("selected", "#123c42")])
+    style.configure("Treeview.Heading", font=(family, 10, "bold"), padding=(6, 8),
+                    background="#e8edf3", relief="flat")
+    style.configure("TNotebook", background="#eef2f6", borderwidth=0)
+    style.configure("TNotebook.Tab", padding=(12, 8), background="#e8edf3")
+    style.map("TNotebook.Tab", background=[("selected", "white")],
+              foreground=[("selected", "#007b74"), ("disabled", "#8994a4")])
+
+
+def open_analysis_window(parent, result, *, container=None, tabs=None):
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
@@ -2574,11 +2617,13 @@ def open_analysis_window(parent, result):
     datasets = (
         result["sets"] if "sets" in result else [{"name": "Prescriptions set", "result": result}]
     )
-    window = tk.Toplevel(parent)
-    window.title("RD EQD2 — Detailed analysis")
-    window.geometry("1240x1000")
-    window.minsize(880, 700)
-    outer = ttk.Frame(window, padding=10)
+    embedded = container is not None
+    window = parent.winfo_toplevel() if embedded else tk.Toplevel(parent)
+    if not embedded:
+        window.title("RD EQD2 — Detailed analysis")
+        window.geometry("1320x1000")
+        window.minsize(980, 740)
+    outer = ttk.Frame(container if embedded else window, padding=8)
     outer.pack(fill="both", expand=True)
     header = ttk.Frame(outer)
     header.pack(fill="x")
@@ -2594,24 +2639,30 @@ def open_analysis_window(parent, result):
     selector.pack(side="left", fill="x", expand=True)
     selector.current(0)
     meta = tk.StringVar()
-    ttk.Label(outer, textvariable=meta, wraplength=1150).pack(anchor="w", pady=(6, 4))
+    meta_label = ttk.Label(outer, textvariable=meta, wraplength=1150)
+    meta_label.pack(anchor="w", pady=(6, 4))
+    outer.bind("<Configure>", lambda event: meta_label.configure(
+        wraplength=max(300, event.width - 20)
+    ))
     toolbar = ttk.Frame(outer)
     toolbar.pack(fill="x", pady=(0, 6))
-    tabs = ttk.Notebook(outer)
-    tabs.pack(fill="both", expand=True)
+    if tabs is None:
+        tabs = ttk.Notebook(outer)
+        tabs.pack(fill="both", expand=True)
     plot_page = ttk.Frame(tabs)
     clinical_page = ttk.Frame(tabs, padding=6)
     prescription_page = ttk.Frame(tabs, padding=6)
     summary_page = ttk.Frame(tabs, padding=6)
     robust_page = ttk.Frame(tabs, padding=6)
     for page, label in [
-        (plot_page, "Dispersion plot"),
+        (plot_page, "EQD2 dispersion"),
         (clinical_page, "Clinical evaluation"),
         (prescription_page, "Prescription values"),
         (summary_page, "Summary & trends"),
         (robust_page, "Robustness"),
     ]:
-        tabs.add(page, text=label)
+        if not embedded or page not in (prescription_page, summary_page):
+            tabs.add(page, text=label)
     options_bar = ttk.Frame(plot_page, padding=5)
     options_bar.pack(fill="x")
     show_lq = tk.BooleanVar(value=True)
@@ -3028,9 +3079,15 @@ def open_analysis_window(parent, result):
         redraw_clinical()
 
     selector.bind("<<ComboboxSelected>>", select_set)
-    window.bind("<Escape>", lambda event: window.destroy())
+    if embedded:
+        toolbar.pack_forget()
+        outer.export_tables = export_tables_dialog
+        outer.export_plot = export_plot_dialog
+        outer.has_clinical = lambda: current()["clinical"] is not None
+    else:
+        window.bind("<Escape>", lambda event: window.destroy())
     select_set()
-    return window
+    return outer if embedded else window
 
 
 def launch_gui(db_path=None):
@@ -3046,95 +3103,88 @@ def launch_gui(db_path=None):
         else PrescriptionStore(initial_sets=DEFAULT_SETS)
     )
     root = tk.Tk()
-    root.title("RD EQD2 Optimizer — Dq calibration")
-    root.geometry("1240x960")
-    root.minsize(850, 690)
-    panel = ttk.Frame(root, padding=10)
+    root.title("RD Dq Optimizer")
+    configure_desktop_style(root)
+    root.geometry("1440x1040")
+    root.minsize(1100, 780)
+    panel = ttk.Frame(root, padding=14)
     panel.pack(fill="both", expand=True)
-
-    controls = ttk.LabelFrame(panel, text="RD EQD2 optimization settings", padding=8)
-    controls.pack(fill="x")
+    heading = ttk.Frame(panel)
+    heading.pack(fill="x", pady=(0, 14))
+    title = ttk.Frame(heading)
+    title.pack(side="left")
+    ttk.Label(title, text="Dq calibration", style="Title.TLabel").pack(anchor="w")
+    ttk.Label(title, text="Resilience–Depletion", style="Subtitle.TLabel").pack(anchor="w")
+    workspace = ttk.Panedwindow(panel, orient="horizontal")
+    workspace.pack(fill="both", expand=True)
+    sidebar = ttk.Frame(workspace, width=280)
+    sidebar.pack_propagate(False)
+    content = ttk.Panedwindow(workspace, orient="vertical")
+    workspace.add(sidebar, weight=0)
+    workspace.add(content, weight=1)
+    controls = ttk.LabelFrame(sidebar, text="Optimization settings", padding=12)
+    controls.pack(side="bottom", fill="x", pady=(12, 0))
     var_start = tk.StringVar(value=f"{DEFAULT_Q_START:g}")
     var_end = tk.StringVar(value=f"{DEFAULT_Q_END:g}")
     var_step = tk.StringVar(value=f"{DEFAULT_Q_STEP:g}")
     var_bound_pct = tk.StringVar(value="5")
-    var_method = tk.StringVar(value=OPTIMIZATION_METHODS["sse"])
+    method_labels = {
+        "sse": "Sum of squared deviations",
+        "sd": "Standard deviation",
+        "range": "Range (max − min)",
+    }
+    var_method = tk.StringVar(value=method_labels["sse"])
     plot_settings_path = store.path.with_name("plot_settings.json")
     plot_settings = read_plot_settings(plot_settings_path)
-    for col, (label, var) in enumerate(
+    for index, (label, var) in enumerate(
         [("q start (Gy)", var_start), ("q end (Gy)", var_end), ("q step (Gy)", var_step)]
     ):
-        ttk.Label(controls, text=label).grid(row=0, column=col, padx=7, sticky="w")
-        ttk.Entry(controls, textvariable=var, width=18).grid(row=1, column=col, padx=7, sticky="we")
-    ttk.Label(controls, text="Minimization criterion").grid(row=0, column=3, padx=7, sticky="w")
+        ttk.Label(controls, text=label).grid(row=index * 2, column=0, sticky="w", pady=(0, 3))
+        ttk.Entry(controls, textvariable=var, width=24).grid(
+            row=index * 2 + 1, column=0, sticky="ew", pady=(0, 8)
+        )
+    ttk.Label(controls, text="Minimization criterion").grid(row=6, column=0, sticky="w", pady=(0, 3))
     methods = ttk.Combobox(
-        controls,
-        textvariable=var_method,
-        state="readonly",
-        width=33,
-        values=list(OPTIMIZATION_METHODS.values()),
+        controls, textvariable=var_method, state="readonly", width=26,
+        values=list(method_labels.values()),
     )
-    methods.grid(row=1, column=3, padx=7, sticky="we")
-    ttk.Label(controls, text="Near-optimal bounds (%)").grid(row=0, column=4, padx=7, sticky="w")
-    ttk.Entry(controls, textvariable=var_bound_pct, width=14).grid(
-        row=1, column=4, padx=7, sticky="we"
-    )
-    controls.columnconfigure(3, weight=1)
-    ttk.Label(
-        controls,
-        text="Bounds use sample EQD2 SD for SSE/SD optimization, or EQD2 range for range optimization.",
-        foreground="#555555",
-    ).grid(row=2, column=0, columnspan=5, sticky="w", padx=7, pady=(6, 0))
-    ttk.Label(
-        controls,
-        text="Enter α/β for q ≥ 0; q < 0 uses its negative. At q = 0, EQD2 = D.",
-        foreground="#555555",
-    ).grid(row=3, column=0, columnspan=5, sticky="w", padx=7, pady=(3, 0))
+    methods.grid(row=7, column=0, sticky="ew", pady=(0, 8))
+    ttk.Label(controls, text="Near-optimal bounds (%)").grid(row=8, column=0, sticky="w", pady=(0, 3))
+    ttk.Entry(controls, textvariable=var_bound_pct).grid(row=9, column=0, sticky="ew")
+    controls.columnconfigure(0, weight=1)
 
-    setbox = ttk.LabelFrame(panel, text="Prescriptions sets — select sets to optimize", padding=8)
-    setbox.pack(fill="x", pady=(8, 4))
+    setbox = ttk.LabelFrame(sidebar, text="Prescription sets", padding=10)
+    setbox.pack(fill="both", expand=True)
     focused = tk.StringVar()
     management_actions = ttk.Frame(setbox)
-    management_actions.pack(fill="x", pady=(0, 5))
+    management_actions.pack(fill="x", pady=(0, 8))
     for index, (label, command) in enumerate(
         [
-            ("New prescriptions set", lambda: edit_dialog()),
-            ("Edit prescriptions set", lambda: edit_selected()),
-            ("Delete prescriptions set", lambda: delete_selected()),
-            ("Import prescriptions set…", lambda: import_set_csv()),
-            ("Export prescriptions set…", lambda: export_set_csv()),
+            ("New set", lambda: edit_dialog()),
+            ("Edit set", lambda: edit_selected()),
+            ("Import…", lambda: import_set_csv()),
+            ("Export…", lambda: export_set_csv()),
         ]
     ):
-        ttk.Button(management_actions, text=label, command=command).grid(
-            row=index // 3, column=index % 3, sticky="w", padx=4, pady=2
+        ttk.Button(management_actions, text=label, width=11, command=command).grid(
+            row=index // 2, column=index % 2, sticky="ew", padx=3, pady=3
         )
-    ttk.Label(
-        setbox,
-        text="Select sets on the left, then use their tabs to choose prescriptions for optimization and export.",
-    ).pack(anchor="w")
-
-    selection_panes = ttk.Panedwindow(setbox, orient="horizontal")
-    selection_panes.pack(fill="both", expand=True, pady=(5, 0))
-    set_list = ttk.LabelFrame(selection_panes, text="Sets to optimize", padding=4)
-    prescription_list = ttk.LabelFrame(
-        selection_panes, text="Prescriptions in the viewed set", padding=4
-    )
-    selection_panes.add(set_list, weight=1)
-    selection_panes.add(prescription_list, weight=3)
-
-    set_actions = ttk.Frame(set_list)
-    set_actions.pack(fill="x", pady=(0, 5))
-    ttk.Button(set_actions, text="Select all sets", command=lambda: set_all_checks(True)).pack(
-        side="left", padx=3
-    )
-    ttk.Button(set_actions, text="Clear all sets", command=lambda: set_all_checks(False)).pack(
-        side="left", padx=3
-    )
-    check_frame = ttk.Frame(set_list)
+    for column in (0, 1):
+        management_actions.columnconfigure(column, weight=1, uniform="set_actions")
+    set_actions = ttk.Frame(setbox)
+    set_actions.pack(fill="x", pady=(0, 8))
+    for column, (label, selected) in enumerate((("Select all", True), ("Clear all", False))):
+        ttk.Button(set_actions, text=label, width=11,
+                   command=lambda value=selected: set_all_checks(value)).grid(
+                       row=0, column=column, sticky="ew", padx=3
+                   )
+        set_actions.columnconfigure(column, weight=1, uniform="set_selection")
+    check_frame = ttk.Frame(setbox)
     check_frame.pack(fill="both", expand=True)
-    selection_canvas = tk.Canvas(check_frame, width=310, height=205, highlightthickness=0)
+    selection_canvas = tk.Canvas(check_frame, width=250, height=180, highlightthickness=0,
+                                 background="#ffffff")
     check_scroll = ttk.Scrollbar(check_frame, orient="vertical", command=selection_canvas.yview)
-    check_hscroll = ttk.Scrollbar(set_list, orient="horizontal", command=selection_canvas.xview)
+    check_hscroll = ttk.Scrollbar(setbox, orient="horizontal", command=selection_canvas.xview)
     selection_canvas.configure(yscrollcommand=check_scroll.set, xscrollcommand=check_hscroll.set)
     check_hscroll.pack(side="bottom", fill="x")
     selection_canvas.pack(side="left", fill="both", expand=True)
@@ -3151,7 +3201,8 @@ def launch_gui(db_path=None):
             selection_id, width=max(event.width, check_items.winfo_reqwidth())
         ),
     )
-
+    prescription_list = ttk.LabelFrame(content, text="Prescriptions", padding=8)
+    content.add(prescription_list, weight=1)
     prescription_tabs = ttk.Notebook(prescription_list)
     prescription_tabs.enable_traversal()
     prescription_tabs.pack(fill="both", expand=True)
@@ -3166,19 +3217,21 @@ def launch_gui(db_path=None):
     syncing_tabs = False
     result_holder = {"result": None, "analysis_window": None}
 
-    bar = ttk.Frame(panel)
-    bar.pack(fill="x", pady=5)
-    status = tk.StringVar(
-        value="Select prescriptions sets and prescriptions, then run RD EQD2 optimization."
-    )
-    ttk.Label(
-        panel,
-        textvariable=status,
-        justify="left",
-        font=("TkDefaultFont", 10, "bold"),
-        wraplength=1100,
-    ).pack(fill="x", pady=(4, 6))
-    results_box = ttk.LabelFrame(panel, text="RD EQD2 optimization results", padding=(6, 3))
+    bar = ttk.Frame(heading)
+    bar.pack(side="right", anchor="center")
+    status = tk.StringVar(value="Ready · Select prescriptions and run optimization.")
+    status_bar = ttk.Label(root, textvariable=status, style="Subtitle.TLabel", padding=(14, 8),
+                           wraplength=1380)
+    status_bar.pack(side="bottom", fill="x", before=panel)
+    root.bind("<Configure>", lambda event: status_bar.configure(
+        wraplength=max(500, event.width - 30)
+    ) if event.widget is root else None)
+    results_area = ttk.Frame(content, padding=(0, 8, 0, 0))
+    content.add(results_area, weight=2)
+    result_toolbar = ttk.Frame(results_area)
+    result_toolbar.pack(fill="x", pady=(0, 6))
+    ttk.Label(result_toolbar, text="Results", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+    results_box = ttk.LabelFrame(results_area, text="Calibration summary", padding=(6, 3))
     results_box.pack(fill="x", pady=(0, 6))
     # Retain access to all result columns on narrower displays.
     results_grid = ttk.Frame(results_box)
@@ -3223,45 +3276,43 @@ def launch_gui(db_path=None):
     results_scroll.grid(row=0, column=1, sticky="ns")
     results_hscroll.grid(row=1, column=0, sticky="ew")
     results_grid.columnconfigure(0, weight=1)
-    plotbox = ttk.Frame(panel)
-    plotbox.pack(fill="both", expand=True)
+    analysis_controls = ttk.Frame(results_area)
+    analysis_controls.pack(fill="x")
+    result_tabs = ttk.Notebook(results_area)
+    result_tabs.pack(fill="both", expand=True)
+    plotbox = ttk.Frame(result_tabs)
+    result_tabs.add(plotbox, text="Optimization profile")
     fig = Figure(figsize=(plot_settings["width_in"], plot_settings["height_in"]), dpi=100)
     ax = fig.add_subplot(111)
     canvas = FigureCanvasTkAgg(fig, master=plotbox)
     canvas.get_tk_widget().pack(fill="both", expand=True)
 
+    def clear_analysis_tabs():
+        for widget in result_tabs.winfo_children():
+            if widget is not plotbox:
+                if str(widget) in result_tabs.tabs():
+                    result_tabs.forget(widget)
+                widget.destroy()
+        for child in analysis_controls.winfo_children():
+            child.destroy()
+        result_holder.pop("embedded_analysis", None)
+
     def draw_blank_plot():
         ax.clear()
-        try:
-            start, stop = float(var_start.get()), float(var_end.get())
-            if math.isfinite(start) and math.isfinite(stop) and start < stop:
-                ax.set_xlim(start, stop)
-        except ValueError:
-            pass
-        placeholder = {"method": method_key(), "plot_settings": plot_settings}
-        ax.set_xlabel(
-            plot_settings["x_label"] or "Candidate parameter ($q$) [Gy]",
-            fontsize=plot_settings["axis_font"],
-            fontfamily=plot_settings["font_family"],
-        )
-        ax.set_ylabel(
-            plot_settings["y_label"] or PLOT_Y_LABELS[method_key()],
-            fontsize=plot_settings["axis_font"],
-            fontfamily=plot_settings["font_family"],
-        )
-        if plot_settings["show_title"]:
-            ax.set_title(
-                plot_title_for(placeholder),
-                fontsize=plot_settings["title_font"],
-                fontfamily=plot_settings["font_family"],
-            )
-        ax.tick_params(labelsize=plot_settings["tick_font"])
-        if plot_settings["show_grid"]:
-            ax.grid(True, alpha=plot_settings["grid_alpha"], linestyle=plot_settings["grid_style"])
-        fig.subplots_adjust(left=0.14, right=0.975, top=0.91, bottom=0.17)
+        ax.set_axis_off()
+        ax.text(0.5, 0.58, "Run optimization to view results", transform=ax.transAxes,
+                ha="center", va="center", fontsize=16, fontweight="bold", color="#172b4d")
+        ax.text(0.5, 0.43, "Select prescriptions and review the settings to begin.",
+                transform=ax.transAxes, ha="center", va="center", fontsize=11, color="#627088")
+        fig.subplots_adjust(left=0.03, right=0.97, top=0.95, bottom=0.05)
 
     def invalidate_result(*_args):
-        analysis_button.pack_forget()
+        analysis_button.configure(state="disabled")
+        clear_analysis_tabs()
+        for label in ("EQD2 dispersion", "Clinical evaluation", "Robustness"):
+            page = ttk.Frame(result_tabs)
+            result_tabs.add(page, text=label, state="disabled")
+        result_tabs.select(plotbox)
         existing = result_holder.get("analysis_window")
         if existing is not None and existing.winfo_exists():
             existing.destroy()
@@ -3450,7 +3501,7 @@ def launch_gui(db_path=None):
 
     def method_key():
         return next(
-            (key for key, label in OPTIMIZATION_METHODS.items() if label == var_method.get()), "sse"
+            (key for key, label in method_labels.items() if label == var_method.get()), "sse"
         )
 
     def method_changed(_event=None):
@@ -3496,6 +3547,7 @@ def launch_gui(db_path=None):
                 "",
                 "end",
                 iid=str(index),
+                tags=("even" if index % 2 == 0 else "odd",),
                 values=(
                     "☑" if checked else "☐",
                     name,
@@ -3509,7 +3561,8 @@ def launch_gui(db_path=None):
         tree.selection_set([row for row in selected if tree.exists(row)])
         tree.yview_moveto(visible)
         view["summary"].set(
-            f"{len(selections.selected_rows(full))} of {len(full['prescriptions'])} prescriptions selected · at least two required"
+            f"{len(selections.selected_rows(full))} of {len(full['prescriptions'])} prescriptions selected · "
+            f"{len(full['local_control_pct'])} observed outcomes"
         )
         refresh_set_label(key)
 
@@ -3583,14 +3636,14 @@ def launch_gui(db_path=None):
         ttk.Label(ab_bar, text="α/β (Gy)").pack(side="left", padx=(0, 6))
         ab = tk.StringVar(value=selections.alpha_beta_text[key])
         ttk.Entry(ab_bar, textvariable=ab, width=12).pack(side="left")
-        ttk.Button(ab_bar, text="Save α/β", command=lambda: save_main_alpha_beta(key)).pack(
+        ttk.Button(ab_bar, text="Save α/β", width=14, command=lambda: save_main_alpha_beta(key)).pack(
             side="left", padx=(6, 14)
         )
         ttk.Button(
-            ab_bar, text="Select all prescriptions", command=lambda: select_prescriptions(True, key)
+            ab_bar, text="Select all", width=14, command=lambda: select_prescriptions(True, key)
         ).pack(side="left", padx=3)
         ttk.Button(
-            ab_bar, text="Clear prescriptions", command=lambda: select_prescriptions(False, key)
+            ab_bar, text="Clear all", width=14, command=lambda: select_prescriptions(False, key)
         ).pack(side="left", padx=3)
         summary = tk.StringVar()
         ttk.Label(frame, textvariable=summary).pack(anchor="w", pady=(0, 5))
@@ -3600,14 +3653,16 @@ def launch_gui(db_path=None):
             details_area,
             columns=("include", "name", "D", "n", "d", "reference", "local_control"),
             show="headings",
-            height=8,
+            height=10,
         )
+        tree.tag_configure("even", background="#ffffff")
+        tree.tag_configure("odd", background="#f3f6fa")
         for column, heading, width in [
             ("include", "Optimize", 70),
-            ("name", "Prescription name", 350),
+            ("name", "Prescription", 300),
             ("D", "D (Gy)", 85),
-            ("n", "n", 60),
-            ("d", "d (Gy/fraction)", 115),
+            ("n", "Fractions", 80),
+            ("d", "Gy/fx", 75),
             ("reference", "Reference", 80),
             ("local_control", "Local control (%)", 120),
         ]:
@@ -4020,7 +4075,7 @@ def launch_gui(db_path=None):
                     "Select at least one prescriptions set before running optimization."
                 )
             method = next(
-                (key for key, label in OPTIMIZATION_METHODS.items() if label == var_method.get()),
+                (key for key, label in method_labels.items() if label == var_method.get()),
                 None,
             )
             if method is None:
@@ -4043,7 +4098,12 @@ def launch_gui(db_path=None):
                 existing.destroy()
             result_holder["analysis_window"] = None
             result_holder["result"] = res
-            analysis_button.pack(side="left", padx=4)
+            analysis_button.configure(state="normal")
+            clear_analysis_tabs()
+            result_holder["embedded_analysis"] = open_analysis_window(
+                root, res, container=analysis_controls, tabs=result_tabs
+            )
+            result_tabs.select(plotbox)
             for item in results_table.get_children():
                 results_table.delete(item)
             boundary_count = 0
@@ -4086,6 +4146,7 @@ def launch_gui(db_path=None):
                     else "All minima lie inside the selected grid."
                 )
             )
+            ax.set_axis_on()
             draw_range_plot(ax, res)
             canvas.draw()
         except Exception as exc:
@@ -4200,11 +4261,82 @@ def launch_gui(db_path=None):
             return
         result_holder["analysis_window"] = open_analysis_window(root, result_holder["result"])
 
-    analysis_button = ttk.Button(bar, text="Analysis…", command=open_analysis)
-    ttk.Button(bar, text="Run optimization", command=run).pack(side="left", padx=4)
-    ttk.Button(bar, text="Plot settings…", command=plot_settings_dialog).pack(side="left", padx=4)
-    ttk.Button(bar, text="Export results + graph", command=save).pack(side="left", padx=4)
-    ttk.Button(bar, text="Export image…", command=image_export_dialog).pack(side="left", padx=4)
+    analysis_button = ttk.Button(result_toolbar, text="Analysis…", command=open_analysis)
+    analysis_button.pack(side="right", padx=(8, 0))
+    ttk.Button(bar, text="Run optimization", style="Accent.TButton", command=run).pack(side="right")
+    ttk.Button(result_toolbar, text="Plot settings…", command=plot_settings_dialog).pack(
+        side="right", padx=(8, 0)
+    )
+    export_menu = tk.Menu(root, tearoff=False)
+    export_menu.add_command(label="Export image…", command=image_export_dialog)
+    export_menu.add_command(label="Export results + graph", command=save)
+    export_menu.add_separator()
+
+    def analysis_export(kind, clinical=False):
+        view = result_holder.get("embedded_analysis")
+        if view is None:
+            messagebox.showinfo("Export", "Run optimization first.", parent=root)
+        elif kind == "tables":
+            view.export_tables()
+        elif clinical and not view.has_clinical():
+            messagebox.showinfo("Export", "No observed local control for this set.", parent=root)
+        else:
+            view.export_plot(clinical=clinical)
+
+    export_menu.add_command(label="Export tables…", command=lambda: analysis_export("tables"))
+    export_menu.add_command(label="Export dispersion plot…", command=lambda: analysis_export("plot"))
+    export_menu.add_command(label="Export clinical evaluation plot…",
+                            command=lambda: analysis_export("plot", clinical=True))
+    ttk.Menubutton(result_toolbar, text="Export", menu=export_menu).pack(side="right", padx=(8, 0))
+    menubar = tk.Menu(root)
+    root.configure(menu=menubar)
+    file_menu = tk.Menu(menubar, tearoff=False)
+    menubar.add_cascade(label="File", menu=file_menu)
+    file_menu.add_command(label="New prescriptions set", accelerator="Ctrl+N", command=edit_dialog)
+    file_menu.add_command(label="Import prescriptions set…", accelerator="Ctrl+O", command=import_set_csv)
+    file_menu.add_command(label="Export prescriptions set…", command=export_set_csv)
+    file_menu.add_separator()
+    file_menu.add_cascade(label="Export results", menu=export_menu)
+    file_menu.add_separator()
+    file_menu.add_command(label="Exit", command=root.destroy)
+    set_menu = tk.Menu(menubar, tearoff=False)
+    menubar.add_cascade(label="Prescriptions", menu=set_menu)
+    set_menu.add_command(label="Edit prescriptions set", command=edit_selected)
+    set_menu.add_command(label="Delete prescriptions set", command=delete_selected)
+    set_menu.add_separator()
+    set_menu.add_command(label="Select all sets", command=lambda: set_all_checks(True))
+    set_menu.add_command(label="Clear all sets", command=lambda: set_all_checks(False))
+    analysis_menu = tk.Menu(menubar, tearoff=False)
+    menubar.add_cascade(label="Analysis", menu=analysis_menu)
+    analysis_menu.add_command(label="Run optimization", accelerator="Ctrl+R", command=run)
+    analysis_menu.add_command(label="Analysis…", command=open_analysis)
+    view_menu = tk.Menu(menubar, tearoff=False)
+    menubar.add_cascade(label="View", menu=view_menu)
+    view_menu.add_command(label="Plot settings…", command=plot_settings_dialog)
+    view_menu.add_separator()
+
+    def select_result_tab(label):
+        for page in result_tabs.tabs():
+            if result_tabs.tab(page, "text") == label and result_tabs.tab(page, "state") != "disabled":
+                result_tabs.select(page)
+                return
+
+    for label in ("Optimization profile", "EQD2 dispersion", "Clinical evaluation", "Robustness"):
+        view_menu.add_command(label=label, command=lambda label=label: select_result_tab(label))
+    help_menu = tk.Menu(menubar, tearoff=False)
+    menubar.add_cascade(label="Help", menu=help_menu)
+    help_menu.add_command(label="Parameter guide", command=lambda: messagebox.showinfo(
+        "Optimization settings",
+        "Bounds use sample EQD2 SD for SSE/SD optimization, or EQD2 range for range optimization.\n\n"
+        "Enter α/β for q ≥ 0; q < 0 uses its negative. At q = 0, EQD2 = D.", parent=root
+    ))
+    help_menu.add_command(label="About RD Dq Optimizer", command=lambda: messagebox.showinfo(
+        "RD Dq Optimizer", "RD Dq Optimizer\nResilience–Depletion EQD2 and BED calculations.", parent=root
+    ))
+    for shortcut, command in (("<Control-n>", edit_dialog), ("<Control-o>", import_set_csv),
+                              ("<Control-r>", run), ("<Control-s>", save)):
+        root.bind(shortcut, lambda event, command=command: command())
+    root.after_idle(lambda: content.sashpos(0, int(content.winfo_height() * 0.46)))
     methods.bind("<<ComboboxSelected>>", method_changed)
     for var in (var_start, var_end, var_step, var_bound_pct):
         var.trace_add("write", invalidate_result)
