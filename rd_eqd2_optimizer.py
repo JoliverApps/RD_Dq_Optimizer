@@ -4106,6 +4106,7 @@ def launch_gui(db_path=None):
             result_tabs.select(plotbox)
             for item in results_table.get_children():
                 results_table.delete(item)
+            results_table.configure(height=min(3, len(res["sets"])))
             boundary_count = 0
             for dataset in res["sets"]:
                 r = dataset["result"]
@@ -4149,6 +4150,7 @@ def launch_gui(db_path=None):
             ax.set_axis_on()
             draw_range_plot(ax, res)
             canvas.draw()
+            root.after_idle(fit_panes)
         except Exception as exc:
             messagebox.showerror("Calculation error", str(exc), parent=root)
 
@@ -4336,7 +4338,13 @@ def launch_gui(db_path=None):
     for shortcut, command in (("<Control-n>", edit_dialog), ("<Control-o>", import_set_csv),
                               ("<Control-r>", run), ("<Control-s>", save)):
         root.bind(shortcut, lambda event, command=command: command())
-    root.after_idle(lambda: content.sashpos(0, int(content.winfo_height() * 0.46)))
+    def fit_panes(_event=None):
+        height = content.winfo_height()
+        if height > 100:
+            content.sashpos(0, max(180, min(420, int(height * 0.38))))
+
+    content.bind("<Configure>", fit_panes)
+    root.after_idle(fit_panes)
     methods.bind("<<ComboboxSelected>>", method_changed)
     for var in (var_start, var_end, var_step, var_bound_pct):
         var.trace_add("write", invalidate_result)

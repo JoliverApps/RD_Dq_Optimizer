@@ -684,7 +684,11 @@ def check_gui(app, db_path, result):
                     root.update_idletasks()
                     assert optimize.winfo_rootx() + optimize.winfo_width() <= root.winfo_rootx() + root.winfo_width()
                     assert prescriptions.winfo_width() > 500
-                    assert result_tabs.winfo_height() > 80
+                    assert result_tabs.winfo_height() > 80, (
+                        geometry, result_tabs.winfo_height(),
+                        result_tabs.master.winfo_height(),
+                        result_tabs.master.master.winfo_height(),
+                    )
                 root.geometry("1440x1040")
 
                 other_name = "Verification — saved set"
