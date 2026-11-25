@@ -507,6 +507,52 @@ def check_prescription_model(app, folder):
     assert exported[-1]["local_control_pct"] == "100.0"
 
 
+def check_prescription_plot_labels(app, detail):
+    """Labels remain inside the drawing area at screen and export sizes."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    endpoints = [app.Prescription("Zero", 52, 26, 0),
+                 app.Prescription("Full", 60, 30, 100)]
+    endpoint_detail = app.build_analysis({"name": "Endpoints", "result":
+        app.analyze(1.5, .01, 10, .1, endpoints)})
+    expected = {f"{p['D_Gy']:g}/{p['n']}" for p in detail["prescriptions"]}
+    for size, dpi in (((8, 7.2), 100), ((6, 4.5), 144)):
+        for kind in ("dispersion", "clinical", "endpoints"):
+            fig = Figure(figsize=size, dpi=dpi)
+            FigureCanvasAgg(fig)
+            if kind == "dispersion":
+                app.draw_dispersion_plot(fig, detail)
+            else:
+                clinical = (detail if kind == "clinical" else endpoint_detail)["clinical"]
+                app.draw_clinical_plot(fig, clinical, show_summary=False)
+            fig.canvas.draw()
+            ax = fig.axes[0]
+            bounds = ax.get_window_extent()
+            labels = [text for text in ax.texts if text.get_gid() == "prescription-label"]
+            assert labels
+            if kind == "dispersion":
+                assert {label.get_text() for label in labels} == expected
+            else:
+                assert len(labels) == len(clinical["observations"])
+            for label in labels:
+                box = label.get_bbox_patch().get_window_extent(fig.canvas.get_renderer())
+                assert bounds.contains(box.x0, box.y0) and bounds.contains(box.x1, box.y1), (
+                    kind, label.get_text(), bounds.bounds, box.bounds
+                )
+                assert label.get_rotation() == 0 and label.get_clip_on()
+            fig.clear()
+    for show_lq in (True, False):
+        fig = Figure()
+        app.draw_dispersion_plot(fig, detail, show_lq=show_lq, show_labels=False)
+        assert not any(t.get_gid() == "prescription-label" for t in fig.axes[0].texts)
+        app.draw_clinical_plot(fig, detail["clinical"], show_labels=False)
+        assert not any(t.get_gid() == "prescription-label" for t in fig.axes[0].texts)
+    fig = Figure()
+    app.draw_dispersion_plot(fig, detail, show_lq=False)
+    assert len([t for t in fig.axes[0].texts if t.get_gid() == "prescription-label"]) == len(expected)
+
+
 def check_clinical_evaluation(app, folder):
     from dataclasses import replace
     import numpy as np
@@ -1276,6 +1322,8 @@ def run_checks(report_path, include_gui=True):
             for extension in app.IMAGE_FORMATS.values():
                 app.export_image(result, folder / ("profile" + extension), ppi=72)
             details = app.build_analysis({"name": "Prostate", "result": result})
+            check_prescription_plot_labels(app, details)
+            passed("Prescription point labels stay inside dispersion and clinical plots")
             robustness = app.run_robustness(details)
             assert len(robustness["leave_one_out"]) == len(prostate["prescriptions"])
             for extension in app.IMAGE_FORMATS.values():

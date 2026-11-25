@@ -105,6 +105,8 @@ The main window shows four result tabs: **Optimization profile**, **EQD2 dispers
 
 At Dq = 0, the sensitization rate s is displayed as **N/A**. At α/β = −2 Gy, the LQ EQD2 reference denominator is zero and the comparison is displayed as **N/A**. With other negative α/β values, LQ extrapolations can produce negative equivalent doses.
 
+**Prescription labels** places dose/fraction labels beside the points inside the dispersion and clinical plots, including saved images and print previews. Labels adjust around nearby points and other labels; the dispersion plot uses blue for RD and orange for LQ, with a shared label where the markers coincide.
+
 ### Clinical evaluation
 
 1. In **New prescriptions set** or **Edit prescriptions set**, enter **Local tumor control (%)** on each row with an observed outcome. A blank cell represents missing data. A value of 0 represents observed 0% local control. For CSV import, use `local_control_pct`.

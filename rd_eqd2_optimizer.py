@@ -2246,13 +2246,70 @@ def export_analysis_tables(a, folder, format="csv"):
     return written
 
 
+def _label_prescriptions(ax, points):
+    """Place point labels inside the axes, avoiding other labels and plot furniture."""
+    from matplotlib.backends.backend_agg import RendererAgg
+    from matplotlib.text import Text
+    from matplotlib.transforms import Bbox
+
+    fig = ax.figure
+    renderer = RendererAgg(max(1, int(fig.bbox.width)), max(1, int(fig.bbox.height)), fig.dpi)
+    scale = fig.dpi / 72
+    bounds = ax.get_window_extent(renderer).padded(-4 * scale)
+    points = list(points)
+    positions = [ax.transData.transform((x, y)) for _, x, y, _ in points]
+    occupied = [Bbox.from_bounds(x - 4 * scale, y - 4 * scale, 8 * scale, 8 * scale)
+                for x, y in positions]
+    occupied += [text.get_window_extent(renderer).padded(2 * scale) for text in ax.texts]
+    if ax.get_legend() is not None:
+        occupied.append(ax.get_legend().get_window_extent(renderer).padded(2 * scale))
+    placed = []
+    for (label, x, y, color), anchor in zip(points, positions):
+        # One label suffices when the RD and LQ markers for a prescription coincide.
+        if any(label == old_label and np.linalg.norm(anchor - old_anchor) < 10 * scale
+               for old_label, old_anchor in placed):
+            continue
+        text = Text(text=label, fontsize=8)
+        text.set_figure(fig)
+        extent = text.get_window_extent(renderer)
+        width, height = extent.width + 3 * scale, extent.height + 3 * scale
+        candidates = []
+        for ring in range(7):
+            gap = (6 + ring * 9) * scale
+            for dx, dy in ((1, 1), (1, -1), (-1, 1), (-1, -1),
+                           (0, 1), (0, -1), (1, 0), (-1, 0)):
+                center = anchor + [dx * (width / 2 + gap), dy * (height / 2 + gap)]
+                center = np.clip(center, [bounds.x0 + width / 2, bounds.y0 + height / 2],
+                                 [bounds.x1 - width / 2, bounds.y1 - height / 2])
+                box = Bbox.from_bounds(center[0] - width / 2, center[1] - height / 2,
+                                       width, height)
+                overlap = sum(max(0, min(box.x1, other.x1) - max(box.x0, other.x0))
+                              * max(0, min(box.y1, other.y1) - max(box.y0, other.y0))
+                              for other in occupied)
+                distance = float(np.sum((center - anchor) ** 2))
+                candidates.append((overlap * 1000 + distance, center, box))
+        _, center, box = min(candidates, key=lambda item: item[0])
+        offset = (center - anchor) / scale
+        annotation = ax.annotate(
+            label, (x, y), xytext=offset, textcoords="offset points",
+            ha="center", va="center", fontsize=8, color=color, zorder=7,
+            clip_on=True, annotation_clip=True,
+            bbox={"facecolor": "white", "edgecolor": "none", "pad": 0.8},
+            arrowprops={"arrowstyle": "-", "color": color, "lw": 0.5,
+                        "shrinkA": 2, "shrinkB": 5},
+        )
+        annotation.set_gid("prescription-label")
+        occupied.append(box.padded(2 * scale))
+        placed.append((label, anchor))
+
+
 def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, reference=None):
     """Plot prescription EQD2 values and fitted trends against dose per fraction."""
     from matplotlib.ticker import MaxNLocator, MultipleLocator
 
     fig.clear()
     fig.set_facecolor("white")
-    ax = fig.add_axes([0.115, 0.21, 0.86, 0.69])
+    ax = fig.add_axes([0.115, 0.12, 0.86, 0.78])
     rows = sorted(a["prescriptions"], key=lambda p: p["d_Gy"])
     d = np.array([p["d_Gy"] for p in rows])
     rd = np.array([p["RD_EQD2_Gy"] for p in rows])
@@ -2323,26 +2380,8 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     ax.grid(True, color="#b7b7b7", alpha=0.25, ls=":", lw=0.8)
     ax.set_ylabel("EQD2 [Gy]", fontsize=13, fontweight="bold")
     ax.set_xlabel(r"Dose per fraction, $d$ [Gy]", fontsize=13, fontweight="bold")
-    ax.xaxis.set_label_coords(0.5, -0.235 if show_labels else -0.10)
+    ax.xaxis.set_label_coords(0.5, -0.10)
     ax.tick_params(axis="both", labelsize=10)
-    if show_labels:
-        levels = []
-        for p, x in zip(rows, d):
-            level = 0
-            while any(abs(x - oldx) < 0.18 and level == oldlevel for oldx, oldlevel in levels):
-                level += 1
-            levels.append((x, level))
-            ax.text(
-                x,
-                -0.085 - 0.05 * level,
-                f"{p['D_Gy']:g}/{p['n']}",
-                rotation=90,
-                ha="center",
-                va="top",
-                transform=ax.get_xaxis_transform(),
-                fontsize=8,
-                clip_on=False,
-            )
     fig.suptitle(
         "RD and LQ EQD2 vs dose per fraction" if show_lq else "RD EQD2 vs dose per fraction",
         fontsize=18,
@@ -2435,6 +2474,11 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
         framealpha=0.9,
         edgecolor="#cccccc",
     )
+    if show_labels:
+        points = [(f"{p['D_Gy']:g}/{p['n']}", x, y, blue) for p, x, y in zip(rows, d, rd)]
+        if show_lq:
+            points += [(f"{p['D_Gy']:g}/{p['n']}", x, y, orange) for p, x, y in zip(rows, d, lq)]
+        _label_prescriptions(ax, points)
     return ax
 
 
@@ -2485,12 +2529,6 @@ def draw_clinical_plot(
             ax.fill_between(beta_grid, lower, upper, color="#f8e6d8",
                             label="Central 95% beta interval", zorder=0)
             y_ranges.extend([lower, upper])
-    if show_labels:
-        for index, (row, x, y) in enumerate(zip(clinical["observations"], eqd2, control)):
-            above = index % 2 == 0 and y < 99
-            ax.annotate(f"{row['D_Gy']:g}/{row['n']}", (x, y), xytext=(5, 6 if above else -6),
-                        textcoords="offset points", va="bottom" if above else "top", fontsize=8)
-
     x_pad = max(1.0, (high[0] - low[0]) * 0.12)
     low_y, high_y = np.clip([min(values.min() for values in y_ranges),
                              max(values.max() for values in y_ranges)], 0, 100)
@@ -2512,6 +2550,9 @@ def draw_clinical_plot(
         fig.text(0.70, 0.87, "Basic analysis", fontsize=11, fontweight="bold", va="top")
         fig.text(0.70, 0.82, "\n\n".join(f"{key}\n{value}" for key, value in stats),
                  fontsize=8.5, va="top", linespacing=1.05)
+    if show_labels:
+        _label_prescriptions(ax, [(f"{row['D_Gy']:g}/{row['n']}", x, y, "#16384b")
+                                  for row, x, y in zip(clinical["observations"], eqd2, control)])
 
 
 def _export_analysis_plot(data, filename, ppi, draw, size, **options):
@@ -2700,6 +2741,7 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
         except Exception as exc:
             messagebox.showerror("Plot settings", str(exc), parent=window)
 
+    canvas.get_tk_widget().bind("<Configure>", lambda event: redraw(), add="+")
     for label, var in [
         ("Show LQ", show_lq),
         ("Prescription labels", show_labels),
