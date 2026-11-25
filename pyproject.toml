@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rd-eqd2-optimizer"
-version = "1.1.0"
+version = "1.2.0"
 description = "Desktop optimizer for Resilience–Depletion EQD2 and BED calculations"
 readme = "README.md"
 requires-python = ">=3.11,<3.13"

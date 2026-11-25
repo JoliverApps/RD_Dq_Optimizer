@@ -2455,7 +2455,9 @@ def draw_dispersion_plot(fig, a, show_lq=True, show_labels=True, show_ci=True, r
     return ax
 
 
-def draw_clinical_plot(fig, clinical, show_beta=True, show_interval=False, show_labels=True):
+def draw_clinical_plot(
+    fig, clinical, show_beta=True, show_interval=False, show_labels=True, show_summary=True
+):
     """Plot observations, descriptive statistics, and the bounded beta trend."""
     from matplotlib.patches import Rectangle
     from matplotlib.ticker import MaxNLocator, PercentFormatter
@@ -2467,7 +2469,10 @@ def draw_clinical_plot(fig, clinical, show_beta=True, show_interval=False, show_
                  ha="center", va="center", wrap=True)
         return
 
-    ax = fig.add_axes([0.10, 0.20, 0.57, 0.68])
+    height_px = fig.get_figheight() * fig.dpi
+    bottom = 0.20 if show_summary else min(0.32, 100 / max(1, height_px))
+    top = 0.88 if show_summary else 1 - min(0.28, 72 / max(1, height_px))
+    ax = fig.add_axes([0.10, bottom, 0.57 if show_summary else 0.85, top - bottom])
     eqd2, control = clinical["points"].T
     low, high = clinical["minimum"], clinical["maximum"]
     dose_grid = np.linspace(low[0], high[0], 160)
@@ -2514,14 +2519,16 @@ def draw_clinical_plot(fig, clinical, show_beta=True, show_interval=False, show_
     ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
     ax.set_axisbelow(True)
     ax.grid(color="#dce4e8", linestyle=":")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=2,
+    legend_y = -0.16 if show_summary else -52 / max(1, (top - bottom) * height_px)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, legend_y), ncol=2,
               fontsize=8.5, frameon=False)
     fig.suptitle("Local tumor control versus RD EQD2", fontsize=16, fontweight="bold", y=0.975)
     ax.set_title(clinical["name"], fontsize=10, pad=9, wrap=True)
-    stats = clinical_basic_summary(clinical)
-    fig.text(0.70, 0.87, "Basic analysis", fontsize=11, fontweight="bold", va="top")
-    fig.text(0.70, 0.82, "\n\n".join(f"{key}\n{value}" for key, value in stats),
-             fontsize=8.5, va="top", linespacing=1.05)
+    if show_summary:
+        stats = clinical_basic_summary(clinical)
+        fig.text(0.70, 0.87, "Basic analysis", fontsize=11, fontweight="bold", va="top")
+        fig.text(0.70, 0.82, "\n\n".join(f"{key}\n{value}" for key, value in stats),
+                 fontsize=8.5, va="top", linespacing=1.05)
 
 
 def _export_analysis_plot(data, filename, ppi, draw, size, **options):
@@ -2560,6 +2567,18 @@ def export_dispersion_plot(a, filename, ppi=300, **options):
 
 def export_clinical_plot(clinical, filename, ppi=300, **options):
     _export_analysis_plot(clinical, filename, ppi, draw_clinical_plot, (10, 6.4), **options)
+
+
+def open_print_preview(filename):
+    """Open a PDF in the system viewer, where the user chooses the printer."""
+    import subprocess
+    import sys
+
+    path = str(Path(filename).resolve())
+    if sys.platform == "win32":
+        os.startfile(path)
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", path])
 
 
 def configure_desktop_style(root):
@@ -2628,10 +2647,8 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
     header = ttk.Frame(outer)
     header.pack(fill="x")
     ttk.Label(header, text="Optimized set").pack(side="left", padx=(0, 8))
-    chosen = tk.StringVar()
     selector = ttk.Combobox(
         header,
-        textvariable=chosen,
         state="readonly",
         width=68,
         values=[ds.get("name") or "Prescriptions set" for ds in datasets],
@@ -2714,18 +2731,20 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
 
     clinical_controls = ttk.Frame(clinical_page)
     clinical_controls.pack(fill="x", pady=(0, 6))
-    clinical_stats = tk.StringVar()
-    clinical_beta = tk.StringVar()
-    ttk.Label(clinical_page, text="Basic analysis").pack(anchor="w")
-    ttk.Label(clinical_page, textvariable=clinical_stats, wraplength=815).pack(
-        anchor="w", pady=(0, 5)
-    )
-    ttk.Label(clinical_page, text="Beta regression").pack(anchor="w")
-    ttk.Label(clinical_page, textvariable=clinical_beta, wraplength=815).pack(
-        anchor="w", pady=(0, 5)
-    )
+    clinical_panes = ttk.Panedwindow(clinical_page, orient="vertical")
+    clinical_panes.pack(fill="both", expand=True)
+    clinical_information = ttk.LabelFrame(clinical_panes, text="Analysis", padding=6)
+    clinical_plot = ttk.Frame(clinical_panes)
+    clinical_panes.add(clinical_information, weight=0)
+    clinical_panes.add(clinical_plot, weight=1)
+    clinical_text = tk.Text(clinical_information, height=9, wrap="word", borderwidth=0,
+                            background="#eef2f6", foreground="#172b4d", state="disabled")
+    clinical_scroll = ttk.Scrollbar(clinical_information, command=clinical_text.yview)
+    clinical_text.configure(yscrollcommand=clinical_scroll.set)
+    clinical_scroll.pack(side="right", fill="y")
+    clinical_text.pack(fill="both", expand=True)
     clinical_figure = Figure(figsize=(10, 6.4), dpi=100)
-    clinical_canvas = FigureCanvasTkAgg(clinical_figure, master=clinical_page)
+    clinical_canvas = FigureCanvasTkAgg(clinical_figure, master=clinical_plot)
     clinical_canvas.get_tk_widget().pack(fill="both", expand=True)
     show_beta = tk.BooleanVar(value=True)
     show_interval = tk.BooleanVar(value=False)
@@ -2736,11 +2755,14 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
             "show_beta": show_beta.get(),
             "show_interval": show_interval.get(),
             "show_labels": clinical_labels.get(),
+            "show_summary": False,
         }
 
     def redraw_clinical():
         draw_clinical_plot(clinical_figure, current()["clinical"], **clinical_options())
         clinical_canvas.draw_idle()
+
+    clinical_canvas.get_tk_widget().bind("<Configure>", lambda event: redraw_clinical(), add="+")
 
     beta_controls = []
     for label, var in [
@@ -3066,17 +3088,75 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
         clinical = a["clinical"]
         if clinical:
             summary = clinical_basic_summary(clinical)
-            clinical_stats.set(" · ".join(f"{key} {value}" for key, value in summary))
-            clinical_beta.set(clinical_beta_summary(clinical))
+            information = (
+                "Basic analysis\n" + "\n".join(f"{key}: {value}" for key, value in summary)
+                + "\n\nBeta regression\n" + clinical_beta_summary(clinical)
+            )
         else:
-            clinical_stats.set("Enter observed local control in the prescription set editor.")
-            clinical_beta.set("Awaiting observed outcomes.")
+            information = "Enter observed local control in the prescription set editor."
+        clinical_text.configure(state="normal")
+        clinical_text.delete("1.0", "end")
+        clinical_text.insert("1.0", information)
+        clinical_text.configure(state="disabled")
         clinical_export.configure(state="normal" if clinical else "disabled")
         for control in beta_controls:
             control.configure(state="normal" if clinical and clinical["beta"] else "disabled")
         refresh_robustness()
         redraw()
         redraw_clinical()
+        update_plot_actions()
+
+    def selected_plot():
+        page = tabs.select()
+        if page == str(plot_page):
+            return "dispersion"
+        if page == str(clinical_page) and current()["clinical"] is not None:
+            return "clinical"
+        return None
+
+    def write_selected_plot(path):
+        if selected_plot() == "clinical":
+            export_clinical_plot(current()["clinical"], path, **clinical_options())
+        elif selected_plot() == "dispersion":
+            export_dispersion_plot(current(), path, **options())
+        else:
+            return False
+        return True
+
+    def save_selected_plot():
+        if selected_plot() is None:
+            return
+        selected_type = tk.StringVar(value="PDF")
+        path = filedialog.asksaveasfilename(
+            parent=window, title="Save plot", defaultextension=".pdf",
+            initialfile=_analysis_stem(current()["name"]) + "_" + selected_plot() + ".pdf",
+            filetypes=[(name, "*" + extension) for name, extension in IMAGE_FORMATS.items()],
+            typevariable=selected_type,
+        )
+        if path:
+            try:
+                extension = IMAGE_FORMATS[selected_type.get()]
+                write_selected_plot(Path(path).with_suffix(extension))
+            except Exception as exc:
+                messagebox.showerror("Save plot", str(exc), parent=window)
+
+    def print_selected_plot():
+        if selected_plot() is None:
+            return
+        import tempfile
+
+        try:
+            path = Path(tempfile.mkdtemp(prefix="rd-dq-print-")) / "analysis.pdf"
+            write_selected_plot(path)
+            open_print_preview(path)
+        except Exception as exc:
+            messagebox.showerror("Print plot", str(exc), parent=window)
+
+    def update_plot_actions(_event=None):
+        if not embedded:
+            state = "normal" if selected_plot() is not None else "disabled"
+            analysis_file.entryconfigure("Save plot…", state=state)
+            analysis_file.entryconfigure("Print plot…", state=state)
 
     selector.bind("<<ComboboxSelected>>", select_set)
     if embedded:
@@ -3084,9 +3164,31 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
         outer.export_tables = export_tables_dialog
         outer.export_plot = export_plot_dialog
         outer.has_clinical = lambda: current()["clinical"] is not None
+        outer.save_plot = save_selected_plot
+        outer.print_plot = print_selected_plot
+        outer.can_save_plot = lambda: selected_plot() is not None
     else:
+        analysis_menubar = tk.Menu(window)
+        window.configure(menu=analysis_menubar)
+        analysis_file = tk.Menu(analysis_menubar, tearoff=False)
+        analysis_menubar.add_cascade(label="File", menu=analysis_file)
+        analysis_file.add_command(label="Save plot…", accelerator="Ctrl+S", command=save_selected_plot)
+        analysis_file.add_command(label="Save tables…", command=export_tables_dialog)
+        analysis_file.add_command(label="Print plot…", accelerator="Ctrl+P", command=print_selected_plot)
+        analysis_file.add_separator()
+        analysis_file.add_command(label="Close", command=window.destroy)
+        analysis_exports = tk.Menu(analysis_menubar, tearoff=False)
+        analysis_menubar.add_cascade(label="Export", menu=analysis_exports)
+        analysis_exports.add_command(label="Export tables…", command=export_tables_dialog)
+        analysis_exports.add_command(label="Export dispersion plot…", command=export_plot_dialog)
+        analysis_exports.add_command(label="Export clinical evaluation plot…",
+                                     command=lambda: export_plot_dialog(clinical=True))
+        tabs.bind("<<NotebookTabChanged>>", update_plot_actions, add="+")
+        window.bind("<Control-s>", lambda event: save_selected_plot())
+        window.bind("<Control-p>", lambda event: print_selected_plot())
         window.bind("<Escape>", lambda event: window.destroy())
     select_set()
+    update_plot_actions()
     return outer if embedded else window
 
 
@@ -3117,13 +3219,14 @@ def launch_gui(db_path=None):
     ttk.Label(title, text="Resilience–Depletion", style="Subtitle.TLabel").pack(anchor="w")
     workspace = ttk.Panedwindow(panel, orient="horizontal")
     workspace.pack(fill="both", expand=True)
-    sidebar = ttk.Frame(workspace, width=280)
-    sidebar.pack_propagate(False)
-    content = ttk.Panedwindow(workspace, orient="vertical")
+    sidebar = ttk.Panedwindow(workspace, orient="vertical", width=280)
+    content = ttk.LabelFrame(workspace, text="Workspace", padding=8)
+    workspace_tabs = ttk.Notebook(content)
+    workspace_tabs.pack(fill="both", expand=True)
     workspace.add(sidebar, weight=0)
     workspace.add(content, weight=1)
     controls = ttk.LabelFrame(sidebar, text="Optimization settings", padding=12)
-    controls.pack(side="bottom", fill="x", pady=(12, 0))
+
     var_start = tk.StringVar(value=f"{DEFAULT_Q_START:g}")
     var_end = tk.StringVar(value=f"{DEFAULT_Q_END:g}")
     var_step = tk.StringVar(value=f"{DEFAULT_Q_STEP:g}")
@@ -3154,7 +3257,8 @@ def launch_gui(db_path=None):
     controls.columnconfigure(0, weight=1)
 
     setbox = ttk.LabelFrame(sidebar, text="Prescription sets", padding=10)
-    setbox.pack(fill="both", expand=True)
+    sidebar.add(setbox, weight=1)
+    sidebar.add(controls, weight=1)
     focused = tk.StringVar()
     management_actions = ttk.Frame(setbox)
     management_actions.pack(fill="x", pady=(0, 8))
@@ -3201,8 +3305,8 @@ def launch_gui(db_path=None):
             selection_id, width=max(event.width, check_items.winfo_reqwidth())
         ),
     )
-    prescription_list = ttk.LabelFrame(content, text="Prescriptions", padding=8)
-    content.add(prescription_list, weight=1)
+    prescription_list = ttk.LabelFrame(workspace_tabs, text="Prescription details", padding=8)
+    workspace_tabs.add(prescription_list, text="Prescriptions")
     prescription_tabs = ttk.Notebook(prescription_list)
     prescription_tabs.enable_traversal()
     prescription_tabs.pack(fill="both", expand=True)
@@ -3226,8 +3330,8 @@ def launch_gui(db_path=None):
     root.bind("<Configure>", lambda event: status_bar.configure(
         wraplength=max(500, event.width - 30)
     ) if event.widget is root else None)
-    results_area = ttk.Frame(content, padding=(0, 8, 0, 0))
-    content.add(results_area, weight=2)
+    results_area = ttk.Frame(workspace_tabs, padding=8)
+    workspace_tabs.add(results_area, text="Results")
     result_toolbar = ttk.Frame(results_area)
     result_toolbar.pack(fill="x", pady=(0, 6))
     ttk.Label(result_toolbar, text="Results", font=("TkDefaultFont", 11, "bold")).pack(side="left")
@@ -3306,8 +3410,25 @@ def launch_gui(db_path=None):
                 transform=ax.transAxes, ha="center", va="center", fontsize=11, color="#627088")
         fig.subplots_adjust(left=0.03, right=0.97, top=0.95, bottom=0.05)
 
+    def can_run():
+        checked = [dataset_cache[key] for key, var in enabled_vars.items() if var.get()]
+        return bool(checked) and all(len(selections.selected_rows(record)) >= 2 for record in checked)
+
+    def sync_action_states(_event=None):
+        run_state = "normal" if can_run() else "disabled"
+        analysis_state = "normal" if result_holder["result"] is not None else "disabled"
+        run_button.configure(state=run_state)
+        analysis_button.configure(state=analysis_state)
+        analysis_menu.entryconfigure("Run optimization", state=run_state)
+        analysis_menu.entryconfigure("Analysis…", state=analysis_state)
+        view = result_holder.get("embedded_analysis")
+        plot_ready = analysis_state == "normal" and workspace_tabs.select() == str(results_area) and (
+            result_tabs.select() == str(plotbox) or (view is not None and view.can_save_plot())
+        )
+        for label in ("Save plot…", "Print plot…"):
+            file_menu.entryconfigure(label, state="normal" if plot_ready else "disabled")
+
     def invalidate_result(*_args):
-        analysis_button.configure(state="disabled")
         clear_analysis_tabs()
         for label in ("EQD2 dispersion", "Clinical evaluation", "Robustness"):
             page = ttk.Frame(result_tabs)
@@ -3323,6 +3444,7 @@ def launch_gui(db_path=None):
         status.set("Inputs changed. Run optimization to update the plot and results.")
         draw_blank_plot()
         canvas.draw_idle()
+        sync_action_states()
 
     def plot_settings_dialog():
         """Edit visualization parameters without changing any optimization data."""
@@ -4064,6 +4186,8 @@ def launch_gui(db_path=None):
             refresh_sets()
 
     def run():
+        if not can_run():
+            return
         try:
             checked = [
                 selections.configured_set(dataset_cache[key])
@@ -4098,7 +4222,6 @@ def launch_gui(db_path=None):
                 existing.destroy()
             result_holder["analysis_window"] = None
             result_holder["result"] = res
-            analysis_button.configure(state="normal")
             clear_analysis_tabs()
             result_holder["embedded_analysis"] = open_analysis_window(
                 root, res, container=analysis_controls, tabs=result_tabs
@@ -4150,8 +4273,11 @@ def launch_gui(db_path=None):
             ax.set_axis_on()
             draw_range_plot(ax, res)
             canvas.draw()
-            root.after_idle(fit_panes)
+            sync_action_states()
+            workspace_tabs.select(results_area)
         except Exception as exc:
+            invalidate_result()
+            status.set("Optimization failed. Review the inputs and run again.")
             messagebox.showerror("Calculation error", str(exc), parent=root)
 
     def save():
@@ -4265,7 +4391,8 @@ def launch_gui(db_path=None):
 
     analysis_button = ttk.Button(result_toolbar, text="Analysis…", command=open_analysis)
     analysis_button.pack(side="right", padx=(8, 0))
-    ttk.Button(bar, text="Run optimization", style="Accent.TButton", command=run).pack(side="right")
+    run_button = ttk.Button(bar, text="Run optimization", style="Accent.TButton", command=run)
+    run_button.pack(side="right")
     ttk.Button(result_toolbar, text="Plot settings…", command=plot_settings_dialog).pack(
         side="right", padx=(8, 0)
     )
@@ -4294,15 +4421,45 @@ def launch_gui(db_path=None):
     root.configure(menu=menubar)
     file_menu = tk.Menu(menubar, tearoff=False)
     menubar.add_cascade(label="File", menu=file_menu)
-    file_menu.add_command(label="New prescriptions set", accelerator="Ctrl+N", command=edit_dialog)
-    file_menu.add_command(label="Import prescriptions set…", accelerator="Ctrl+O", command=import_set_csv)
-    file_menu.add_command(label="Export prescriptions set…", command=export_set_csv)
+    def save_current_plot():
+        if result_holder["result"] is None or file_menu.entrycget("Save plot…", "state") == "disabled":
+            return
+        if result_tabs.select() == str(plotbox):
+            image_export_dialog()
+        else:
+            view = result_holder.get("embedded_analysis")
+            if view is not None:
+                view.save_plot()
+
+    def print_current_plot():
+        if result_holder["result"] is None or file_menu.entrycget("Print plot…", "state") == "disabled":
+            return
+        if result_tabs.select() != str(plotbox):
+            view = result_holder.get("embedded_analysis")
+            if view is not None:
+                view.print_plot()
+            return
+        import tempfile
+
+        try:
+            path = Path(tempfile.mkdtemp(prefix="rd-dq-print-")) / "optimization.pdf"
+            export_image(result_holder["result"], path)
+            open_print_preview(path)
+        except Exception as exc:
+            messagebox.showerror("Print plot", str(exc), parent=root)
+
+    file_menu.add_command(label="Save plot…", accelerator="Ctrl+S", command=save_current_plot)
+    file_menu.add_command(label="Print plot…", accelerator="Ctrl+P", command=print_current_plot)
     file_menu.add_separator()
     file_menu.add_cascade(label="Export results", menu=export_menu)
     file_menu.add_separator()
     file_menu.add_command(label="Exit", command=root.destroy)
     set_menu = tk.Menu(menubar, tearoff=False)
     menubar.add_cascade(label="Prescriptions", menu=set_menu)
+    set_menu.add_command(label="New prescriptions set", accelerator="Ctrl+N", command=edit_dialog)
+    set_menu.add_command(label="Import prescriptions set…", accelerator="Ctrl+O", command=import_set_csv)
+    set_menu.add_command(label="Export prescriptions set…", command=export_set_csv)
+    set_menu.add_separator()
     set_menu.add_command(label="Edit prescriptions set", command=edit_selected)
     set_menu.add_command(label="Delete prescriptions set", command=delete_selected)
     set_menu.add_separator()
@@ -4316,10 +4473,14 @@ def launch_gui(db_path=None):
     menubar.add_cascade(label="View", menu=view_menu)
     view_menu.add_command(label="Plot settings…", command=plot_settings_dialog)
     view_menu.add_separator()
+    view_menu.add_command(label="Prescriptions", command=lambda: workspace_tabs.select(prescription_list))
+    view_menu.add_command(label="Results", command=lambda: workspace_tabs.select(results_area))
+    view_menu.add_separator()
 
     def select_result_tab(label):
         for page in result_tabs.tabs():
             if result_tabs.tab(page, "text") == label and result_tabs.tab(page, "state") != "disabled":
+                workspace_tabs.select(results_area)
                 result_tabs.select(page)
                 return
 
@@ -4336,15 +4497,12 @@ def launch_gui(db_path=None):
         "RD Dq Optimizer", "RD Dq Optimizer\nResilience–Depletion EQD2 and BED calculations.", parent=root
     ))
     for shortcut, command in (("<Control-n>", edit_dialog), ("<Control-o>", import_set_csv),
-                              ("<Control-r>", run), ("<Control-s>", save)):
+                              ("<Control-r>", run), ("<Control-s>", save_current_plot),
+                              ("<Control-p>", print_current_plot)):
         root.bind(shortcut, lambda event, command=command: command())
-    def fit_panes(_event=None):
-        height = content.winfo_height()
-        if height > 100:
-            content.sashpos(0, max(180, min(420, int(height * 0.38))))
-
-    content.bind("<Configure>", fit_panes)
-    root.after_idle(fit_panes)
+    result_tabs.bind("<<NotebookTabChanged>>", sync_action_states, add="+")
+    workspace_tabs.bind("<<NotebookTabChanged>>", sync_action_states, add="+")
+    root.after(100, lambda: sidebar.sashpos(0, max(220, int(sidebar.winfo_height() * 0.50))))
     methods.bind("<<ComboboxSelected>>", method_changed)
     for var in (var_start, var_end, var_step, var_bound_pct):
         var.trace_add("write", invalidate_result)

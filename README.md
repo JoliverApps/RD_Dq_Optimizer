@@ -37,9 +37,11 @@ python rd_eqd2_optimizer.py
 
 ## Desktop interface
 
-The left column groups prescription sets and optimization settings. **New set**, **Edit set**, **Import…**, and **Export…** manage the selected set. The **File**, **Prescriptions**, **Analysis**, **View**, and **Help** menus provide secondary actions, including deletion and parameter guidance. Use **Export** above the result tabs for plots, tables, or combined results.
+The left column groups prescription sets and optimization settings. Drag the divider between the two boxes to adjust their heights, or the divider beside the workspace to adjust their widths. **New set**, **Edit set**, **Import…**, and **Export…** manage the selected set. All prescription-management commands are in the **Prescriptions** menu. **File** provides saving, printing, and result exports; **Help** includes parameter guidance.
 
-The horizontal and vertical dividers resize the set list, prescription table, and results area. Buttons within each group share the same dimensions. Keyboard shortcuts: **Ctrl+N** creates a set, **Ctrl+O** imports one, **Ctrl+R** runs optimization, and **Ctrl+S** exports results and the graph.
+The workspace has two main tabs. **Prescriptions** contains a subtab for each selected prescription set. **Results** contains **Optimization profile**, **EQD2 dispersion**, **Clinical evaluation**, and **Robustness**. Buttons within each group share the same dimensions. Keyboard shortcuts: **Ctrl+N** creates a set, **Ctrl+O** imports one, **Ctrl+R** runs optimization, **Ctrl+S** saves the selected plot, and **Ctrl+P** opens its print preview.
+
+**Run optimization** is disabled in the button and menu when no set is selected, or when any selected set contains fewer than two checked prescriptions. **Analysis…** becomes available only after a successful run. Changing inputs clears the old results and disables analysis until another run succeeds.
 
 ## Run an optimization
 
@@ -49,7 +51,7 @@ The horizontal and vertical dividers resize the set list, prescription table, an
 4. Set the q search interval and step, and choose **SSE**, **SD**, or **Range**.
 5. Click **Run optimization**, then use the result tabs to inspect the profile, EQD2 dispersion, clinical evaluation, and robustness. **Analysis…** opens the full analysis in a separate window.
 
-Each set is optimized independently. Switching tabs preserves the current prescription selections and α/β entries. The **Optimize** checkboxes control which saved rows take part in the current fit.
+A successful run opens the **Results** tab. Each set is optimized independently. Switching tabs preserves the current prescription selections and α/β entries. The **Optimize** checkboxes control which saved rows take part in the current fit.
 
 With all ten built-in prostate prescriptions, the default search and SSE criterion give Dq ≈ 3.4833 Gy, mean EQD2 ≈ 75.5906 Gy, and sample SD ≈ 2.9625 Gy. The [sample CSV](samples/prostate.csv) contains the same prescription doses and fraction counts.
 
@@ -77,6 +79,12 @@ Use a smaller step for a finer grid. If the application reports too many grid po
 
 **Near-optimal bounds (%)** defines a tolerance above the minimum. The bounds use sample SD for SSE and SD fits and EQD2 range for range fits. The default tolerance is 5%.
 
+## Save and print
+
+In the main window, **File → Save plot…** saves the selected result plot. **File → Print plot…** opens a PDF in the system viewer; use that viewer’s Print command to choose a printer and print settings. Plot actions are enabled when a valid plot is selected in **Results**.
+
+The separate **Analysis…** window has its own **File** and **Export** menus. Use **Save plot…**, **Save tables…**, or **Print plot…** there. Plot saving and printing follow the selected dispersion or clinical plot. For prescription-value, summary, and robustness tables, use **Save tables…** or the table export commands. Other export formats remain available through **Export**.
+
 ## Read the results
 
 The results table reports Dq, the signed α/β for the fitted branch, the minimized objective, mean EQD2, sample SD, relative standard deviation (RSD), trend measure η, EQD2 range, and profile bounds.
@@ -101,7 +109,7 @@ At Dq = 0, the sensitization rate s is displayed as **N/A**. At α/β = −2 Gy,
 2. Run the optimization with the desired prescriptions. The Dq fit uses the total doses and fraction counts of all checked rows.
 3. Select **Clinical evaluation** in the results area, or open **Analysis… → Clinical evaluation**. Each checked row with an outcome contributes one equally weighted point using its RD EQD2 at the fitted Dq.
 
-The plot and summary show means, observed minimum–maximum ranges, a linear trend, and R² where defined. A shaded rectangle marks a compact majority subgroup when the [cluster rule](MATHEMATICS.md#clinical-evaluation) is met. The summary compares the enclosing areas on the RD and LQ scales for the same observations when the ratio is defined.
+The plot and summary show means, observed minimum–maximum ranges, a linear trend, and R² where defined. The clinical tab separates the scrollable numerical analysis from the plot with a draggable divider. Basic analysis and beta-regression results appear together in the information pane. A shaded rectangle marks a compact majority subgroup when the [cluster rule](MATHEMATICS.md#clinical-evaluation) is met. The summary compares the enclosing areas on the RD and LQ scales for the same observations when the ratio is defined.
 
 Use **Beta mean** to show the fitted mean curve and **95% beta interval** to overlay the central conditional outcome interval. The dose-dependent fit requires at least four observations with varying EQD2 and varying local control. At constant EQD2, three or more varying outcomes can support an intercept-only fit. Use **Export clinical evaluation plot…** to save the figure.
 

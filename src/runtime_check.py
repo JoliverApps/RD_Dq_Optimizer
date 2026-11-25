@@ -604,10 +604,29 @@ def check_gui(app, db_path, result):
                     for w in children(root)
                     if isinstance(w, ttk.Notebook)
                     and isinstance(w.master, ttk.LabelFrame)
-                    and w.master.cget("text") == "Prescriptions"
+                    and w.master.cget("text") == "Prescription details"
                 )
 
+                workspace_tabs = notebook.master.master
+                assert [workspace_tabs.tab(page, "text") for page in workspace_tabs.tabs()] == [
+                    "Prescriptions", "Results"
+                ]
+
+                def menu_item(label, parent=root):
+                    for menu in children(parent):
+                        if not isinstance(menu, tk.Menu) or menu.index("end") is None:
+                            continue
+                        for index in range(menu.index("end") + 1):
+                            if menu.type(index) == "command" and menu.entrycget(index, "label") == label:
+                                return menu, index
+                    raise AssertionError("Menu action missing: " + label)
+
+                def menu_state(label, parent=root):
+                    menu, index = menu_item(label, parent)
+                    return menu.entrycget(index, "state")
+
                 def view(name):
+                    workspace_tabs.select(notebook.master)
                     page = next(tab for tab in notebook.tabs() if notebook.tab(tab, "text") == name)
                     notebook.select(page)
                     notebook.event_generate("<<NotebookTabChanged>>")
@@ -650,6 +669,28 @@ def check_gui(app, db_path, result):
                     menubar.entrycget(i, "label") for i in range(menubar.index("end") + 1)
                     if menubar.type(i) == "cascade"
                 ] == ["File", "Prescriptions", "Analysis", "View", "Help"]
+                assert button("Analysis…").instate(["disabled"])
+                assert menu_state("Analysis…") == "disabled"
+                assert optimize.instate(["!disabled"])
+                assert menu_state("Run optimization") == "normal"
+                file_menu = root.nametowidget(menubar.entrycget("File", "menu"))
+                set_menu = root.nametowidget(menubar.entrycget("Prescriptions", "menu"))
+                for label in ("New prescriptions set", "Import prescriptions set…", "Export prescriptions set…"):
+                    menu, _index = menu_item(label)
+                    assert menu is set_menu
+                assert not any(
+                    file_menu.type(i) == "command" and "prescriptions" in file_menu.entrycget(i, "label")
+                    for i in range(file_menu.index("end") + 1)
+                )
+                left_panes = next(
+                    w for w in children(root) if isinstance(w, ttk.Panedwindow)
+                    and len(w.panes()) == 2
+                    and isinstance(root.nametowidget(w.panes()[0]), ttk.LabelFrame)
+                    and root.nametowidget(w.panes()[0]).cget("text") == "Prescription sets"
+                )
+                left_panes.sashpos(0, 300)
+                root.update_idletasks()
+                assert abs(left_panes.sashpos(0) - 300) < 4
                 management = [button(text) for text in ("New set", "Edit set", "Import…", "Export…")]
                 assert len({(w.winfo_width(), w.winfo_height()) for w in management}) == 1
                 result_tabs = next(
@@ -672,6 +713,23 @@ def check_gui(app, db_path, result):
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
                 assert int(row[1]) == original_count - 1 and float(row[2]) == 2.2
+                assert button("Analysis…").instate(["!disabled"])
+                assert menu_state("Analysis…") == "normal"
+                assert workspace_tabs.tab(workspace_tabs.select(), "text") == "Results"
+                optimized_selector = next(
+                    w for w in children(root) if isinstance(w, ttk.Combobox)
+                    and app.PROSTATE_SET_NAME in w.cget("values")
+                )
+                assert optimized_selector.get() == app.PROSTATE_SET_NAME
+                # A failed run must never leave the previous analysis enabled.
+                with patch.object(messagebox, "showerror") as invalid_input:
+                    root.setvar(step_entry.cget("textvariable"), "invalid")
+                    optimize.invoke()
+                    assert invalid_input.called
+                assert button("Analysis…").instate(["disabled"])
+                assert menu_state("Analysis…") == "disabled"
+                root.setvar(step_entry.cget("textvariable"), "0.05")
+                optimize.invoke()
                 assert [result_tabs.tab(page, "text") for page in result_tabs.tabs()] == [
                     "Optimization profile", "EQD2 dispersion", "Clinical evaluation", "Robustness"
                 ]
@@ -728,7 +786,17 @@ def check_gui(app, db_path, result):
                 assert float(other_ab.get()) == 3.1 and other_tree.set("0", "include") == "☐"
                 button("Clear all sets").invoke()
                 assert not notebook.tabs()
+                assert optimize.instate(["disabled"])
+                assert menu_state("Run optimization") == "disabled"
+                assert button("Analysis…").instate(["disabled"])
+                assert menu_state("Analysis…") == "disabled"
+                # Keyboard callbacks share the same selection guard as menus and buttons.
+                root.event_generate("<Control-r>")
+                root.update_idletasks()
+                assert not results.get_children()
                 button("Select all sets").invoke()
+                assert optimize.instate(["!disabled"])
+                assert menu_state("Run optimization") == "normal"
                 assert len(notebook.tabs()) == 2
                 _, other_tree, other_ab = view(other_name)
                 assert float(other_ab.get()) == 3.1 and other_tree.set("0", "include") == "☐"
@@ -757,6 +825,8 @@ def check_gui(app, db_path, result):
                 for text in ("Plot settings…", "Export image…"):
                     button(text).invoke()
                 root.setvar(ab_entry.cget("textvariable"), "2")
+                assert button("Analysis…").instate(["disabled"])
+                assert menu_state("Analysis…") == "disabled"
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
                 assert float(row[2]) == 2
@@ -811,11 +881,46 @@ def check_gui(app, db_path, result):
                 )
                 analysis_tabs.select(clinical_tab)
                 root.update_idletasks()
-                assert any(
-                    "Mean local control" in str(root.getvar(w.cget("textvariable")))
-                    for w in children(root.nametowidget(clinical_tab))
-                    if isinstance(w, ttk.Label) and w.cget("textvariable")
+                clinical_widgets = list(children(root.nametowidget(clinical_tab)))
+                clinical_text = next(w for w in clinical_widgets if isinstance(w, tk.Text))
+                assert "Mean local control" in clinical_text.get("1.0", "end")
+                assert "Beta regression" in clinical_text.get("1.0", "end")
+                split = next(w for w in clinical_widgets if isinstance(w, ttk.Panedwindow))
+                analysis.update()
+                target = int(split.winfo_height() * 0.35)
+                assert split.winfo_height() > 180, split.winfo_height()
+                split.sashpos(0, target)
+                root.update_idletasks()
+                assert abs(split.sashpos(0) - target) < 4, (split.sashpos(0), target)
+                assert menu_state("Save plot…", analysis) == "normal"
+                assert menu_state("Print plot…", analysis) == "normal"
+                save_path = Path(db_path).with_name("saved-clinical.pdf")
+                filedialog.asksaveasfilename = lambda **_kwargs: str(save_path)
+                button("Save plot…", analysis).invoke()
+                assert save_path.read_bytes().startswith(b"%PDF")
+                def choose_jpg(**kwargs):
+                    kwargs["typevariable"].set("JPG")
+                    return str(save_path)
+                filedialog.asksaveasfilename = choose_jpg
+                button("Save plot…", analysis).invoke()
+                assert save_path.with_suffix(".jpg").read_bytes().startswith(b"\xff\xd8")
+                with patch.object(app, "open_print_preview") as preview:
+                    button("Print plot…", analysis).invoke()
+                    assert preview.call_count == 1
+                    printed = Path(preview.call_args.args[0])
+                    assert printed.read_bytes().startswith(b"%PDF")
+                    printed.unlink()
+                    printed.parent.rmdir()
+                table_tab = next(
+                    page for page in analysis_tabs.tabs()
+                    if analysis_tabs.tab(page, "text") == "Prescription values"
                 )
+                analysis_tabs.select(table_tab)
+                analysis_tabs.event_generate("<<NotebookTabChanged>>")
+                assert menu_state("Save plot…", analysis) == "disabled"
+                assert menu_state("Print plot…", analysis) == "disabled"
+                analysis_tabs.select(clinical_tab)
+                analysis_tabs.event_generate("<<NotebookTabChanged>>")
                 reference_entry = next(
                     w
                     for w in children(analysis)
