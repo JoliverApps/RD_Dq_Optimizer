@@ -91,7 +91,9 @@ The results table reports Dq, the signed α/β for the fitted branch, the minimi
 
 A minimum marked **BOUNDARY** lies at a search endpoint. **Outside search** indicates that at least one profile-bound crossing lies beyond the selected interval.
 
-The main window shows four result tabs: **Optimization profile**, **EQD2 dispersion**, **Clinical evaluation**, and **Robustness**. The **Optimized set** dropdown selects the set used by the three analysis tabs. The optimization profile displays all fitted sets.\n\n**Analysis…** opens a separate window with five tabs for the selected optimized set.
+The main window shows four result tabs: **Optimization profile**, **EQD2 dispersion**, **Clinical evaluation**, and **Robustness**. The **Optimized set** dropdown selects the set used by the three analysis tabs. The optimization profile displays all fitted sets.
+
+**Analysis…** opens a separate window with five tabs for the selected optimized set.
 
 | Tab | Contents |
 | --- | --- |
@@ -186,7 +188,15 @@ python tools/build.py Build Release
 
 The build installs pinned dependencies in `.venv-build`, runs source and packaged-app checks, and writes the app and build manifest to `dist/Release`. On headless Linux, use `xvfb-run -a python tools/build.py Build Release`. On Windows, `Build.cmd Build Release` also works. Set `RD_PYTHON` to the full path of `python.exe` if the Windows launcher cannot find your interpreter.
 
-The [GitHub Actions workflow](.github/workflows/desktop-release.yml) builds and tests Windows x64, macOS Apple silicon, macOS Intel, and Linux x64 on pull requests to `main`. A change to the package version in `pyproject.toml` on `main` triggers a release build. Once the platform tests pass, the workflow publishes the version tag, four desktop downloads, and their checksums if that version has no published release.
+Desktop builds on GitHub are **manual only**. Commits, pull requests, merges, and package-version changes do not start a build. Use the standalone Python file to evaluate changes before requesting a desktop build.
+
+To build and publish desktop downloads:
+
+1. For a new release, set a new version in `pyproject.toml` and commit it to `main`. Existing published versions are not overwritten.
+2. Open **Actions → Build desktop apps → Run workflow**.
+3. Select **main**, then click **Run workflow**.
+
+The [workflow](.github/workflows/desktop-release.yml) builds and tests Windows x64, macOS Apple silicon, macOS Intel, and Linux x64. Publication runs only after all four platform checks pass. Packages and checksums are uploaded to a draft, and the release becomes public only after every upload succeeds. If a build or upload fails, the last published release remains available. A manual run on another branch produces build artifacts without publishing a release.
 
 ### Sign local Windows Debug builds
 

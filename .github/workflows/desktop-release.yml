@@ -1,11 +1,6 @@
 name: Build desktop apps
 
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
-    paths: [pyproject.toml, .github/workflows/desktop-release.yml]
   workflow_dispatch:
 
 permissions:
@@ -69,7 +64,6 @@ jobs:
               ;;
           esac
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
-        if: github.event_name != 'pull_request'
         with:
           name: desktop-${{ matrix.platform }}
           path: release/${{ env.ASSET }}
@@ -79,7 +73,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -129,33 +123,3 @@ jobs:
           done
           gh release edit "$tag" --draft=false --latest --repo "$GITHUB_REPOSITORY"
 
-      - name: Remove merged branches for the workspace release
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
-          if [[ "$version" != "1.2.0" ]]; then
-            exit 0
-          fi
-          branches=(
-            codex/prostate-local-control
-            codex/release-1.0.1
-            codex/visual-refresh
-            codex/workspace-tabs
-            codex/release-publishing
-            codex/release-cleanup
-          )
-          for branch in "${branches[@]}"; do
-            if ! branch_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq .object.sha 2>/dev/null); then
-              continue
-            fi
-            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$branch_sha...$GITHUB_SHA" --jq .status)
-            if [[ "$status" == "ahead" || "$status" == "identical" ]]; then
-              gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch"
-              echo "Deleted merged branch: $branch"
-            else
-              echo "Kept branch with unmerged work: $branch"
-            fi
-          done
