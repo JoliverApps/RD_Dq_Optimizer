@@ -881,9 +881,12 @@ def check_gui(app, db_path, result):
                 assert "Mean local control" in clinical_text.get("1.0", "end")
                 assert "Beta regression" in clinical_text.get("1.0", "end")
                 split = next(w for w in clinical_widgets if isinstance(w, ttk.Panedwindow))
-                split.sashpos(0, 180)
+                analysis.update()
+                target = int(split.winfo_height() * 0.35)
+                assert split.winfo_height() > 180, split.winfo_height()
+                split.sashpos(0, target)
                 root.update_idletasks()
-                assert abs(split.sashpos(0) - 180) < 4
+                assert abs(split.sashpos(0) - target) < 4, (split.sashpos(0), target)
                 assert menu_state("Save plot…", analysis) == "normal"
                 assert menu_state("Print plot…", analysis) == "normal"
                 save_path = Path(db_path).with_name("saved-clinical.pdf")

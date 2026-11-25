@@ -113,3 +113,31 @@ jobs:
           gh release create "$tag" "${assets[@]}" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "RD EQD2 Optimizer $tag" --generate-notes
+
+      - name: Remove merged branches for the workspace release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [[ "$version" != "1.2.0" ]]; then
+            exit 0
+          fi
+          branches=(
+            codex/prostate-local-control
+            codex/release-1.0.1
+            codex/visual-refresh
+            codex/workspace-tabs
+          )
+          for branch in "${branches[@]}"; do
+            if ! branch_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq .object.sha 2>/dev/null); then
+              continue
+            fi
+            status=$(gh api "repos/$GITHUB_REPOSITORY/compare/$branch_sha...$GITHUB_SHA" --jq .status)
+            if [[ "$status" == "ahead" || "$status" == "identical" ]]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch"
+              echo "Deleted merged branch: $branch"
+            else
+              echo "Kept branch with unmerged work: $branch"
+            fi
+          done
