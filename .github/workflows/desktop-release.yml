@@ -5,7 +5,7 @@ on:
     branches: [main]
   push:
     branches: [main]
-    paths: [pyproject.toml]
+    paths: [pyproject.toml, .github/workflows/desktop-release.yml]
   workflow_dispatch:
 
 permissions:
@@ -112,7 +112,8 @@ jobs:
           sha256sum "${assets[@]}" > SHA256SUMS.txt
           gh release create "$tag" "${assets[@]}" SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "RD EQD2 Optimizer $tag" --generate-notes
+            --title "RD EQD2 Optimizer $tag" \
+            --notes "Desktop packages for version $version. See the repository README for usage and export options."
 
       - name: Remove merged branches for the workspace release
         env:
@@ -128,6 +129,7 @@ jobs:
             codex/release-1.0.1
             codex/visual-refresh
             codex/workspace-tabs
+            codex/release-publishing
           )
           for branch in "${branches[@]}"; do
             if ! branch_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq .object.sha 2>/dev/null); then
