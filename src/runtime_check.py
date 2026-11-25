@@ -584,18 +584,27 @@ def check_gui(app, db_path, result):
                 from unittest.mock import patch
 
                 def button(text, parent=None):
-                    return next(
-                        w
-                        for w in children(parent or root)
-                        if isinstance(w, ttk.Button) and str(w.cget("text")) == text
-                    )
+                    from types import SimpleNamespace
+
+                    owner = parent or root
+                    for widget in children(owner):
+                        if isinstance(widget, ttk.Button) and str(widget.cget("text")) == text:
+                            return widget
+                    # Secondary actions are available through the desktop menus.
+                    for menu in children(owner):
+                        if not isinstance(menu, tk.Menu) or menu.index("end") is None:
+                            continue
+                        for index in range(menu.index("end") + 1):
+                            if menu.type(index) == "command" and menu.entrycget(index, "label") == text:
+                                return SimpleNamespace(invoke=lambda m=menu, i=index: m.invoke(i))
+                    raise AssertionError("Action not found: " + text)
 
                 notebook = next(
                     w
                     for w in children(root)
                     if isinstance(w, ttk.Notebook)
                     and isinstance(w.master, ttk.LabelFrame)
-                    and w.master.cget("text") == "Prescriptions in the viewed set"
+                    and w.master.cget("text") == "Prescriptions"
                 )
 
                 def view(name):
@@ -630,11 +639,28 @@ def check_gui(app, db_path, result):
                     for w in children(root)
                     if isinstance(w, ttk.Entry)
                     and isinstance(w.master, ttk.LabelFrame)
-                    and w.master.cget("text") == "RD EQD2 optimization settings"
-                    and w.grid_info().get("column") == 2
+                    and w.master.cget("text") == "Optimization settings"
+                    and w.grid_info().get("row") == 5
                 )
                 root.setvar(step_entry.cget("textvariable"), "0.05")
                 optimize = button("Run optimization")
+                root.update_idletasks()
+                menubar = root.nametowidget(root.cget("menu"))
+                assert [
+                    menubar.entrycget(i, "label") for i in range(menubar.index("end") + 1)
+                    if menubar.type(i) == "cascade"
+                ] == ["File", "Prescriptions", "Analysis", "View", "Help"]
+                management = [button(text) for text in ("New set", "Edit set", "Import…", "Export…")]
+                assert len({(w.winfo_width(), w.winfo_height()) for w in management}) == 1
+                result_tabs = next(
+                    w for w in children(root) if isinstance(w, ttk.Notebook)
+                    and any(w.tab(page, "text") == "Optimization profile" for page in w.tabs())
+                )
+                assert all(
+                    result_tabs.tab(page, "state") == "disabled"
+                    for page in result_tabs.tabs()
+                    if result_tabs.tab(page, "text") != "Optimization profile"
+                )
                 assert len(notebook.tabs()) == 1
                 frame, prescriptions, ab_entry = view(app.PROSTATE_SET_NAME)
                 original_count = len(app.PROSTATE_PRESCRIPTIONS)
@@ -646,6 +672,24 @@ def check_gui(app, db_path, result):
                 optimize.invoke()
                 row = results.item(results.get_children()[0], "values")
                 assert int(row[1]) == original_count - 1 and float(row[2]) == 2.2
+                assert [result_tabs.tab(page, "text") for page in result_tabs.tabs()] == [
+                    "Optimization profile", "EQD2 dispersion", "Clinical evaluation", "Robustness"
+                ]
+                for page in result_tabs.tabs():
+                    result_tabs.select(page)
+                    root.update_idletasks()
+                result_tabs.select(result_tabs.tabs()[0])
+                for geometry in ("1100x780", "1440x1040"):
+                    root.geometry(geometry)
+                    root.update_idletasks()
+                    assert optimize.winfo_rootx() + optimize.winfo_width() <= root.winfo_rootx() + root.winfo_width()
+                    assert prescriptions.winfo_width() > 500
+                    assert result_tabs.winfo_height() > 80, (
+                        geometry, result_tabs.winfo_height(),
+                        result_tabs.master.winfo_height(),
+                        result_tabs.master.master.winfo_height(),
+                    )
+                root.geometry("1440x1040")
 
                 other_name = "Verification — saved set"
                 set_checkbox(other_name).invoke()
