@@ -792,6 +792,28 @@ def check_gui(app, db_path, result):
                 for page in result_tabs.tabs():
                     result_tabs.select(page)
                     root.update_idletasks()
+                embedded_clinical = next(
+                    page for page in result_tabs.tabs()
+                    if result_tabs.tab(page, "text") == "Clinical evaluation"
+                )
+                result_tabs.select(embedded_clinical)
+                clinical_subtabs = next(
+                    w for w in children(root.nametowidget(embedded_clinical))
+                    if isinstance(w, ttk.Notebook)
+                )
+                assert [clinical_subtabs.tab(page, "text") for page in clinical_subtabs.tabs()] == [
+                    "Analysis", "Plot"
+                ]
+                root.update()
+                assert menu_state("Save plot…") == "disabled"
+                assert menu_state("Print plot…") == "disabled"
+                clinical_subtabs.select(clinical_subtabs.tabs()[1])
+                root.update()
+                assert menu_state("Save plot…") == "normal"
+                assert menu_state("Print plot…") == "normal"
+                clinical_subtabs.select(clinical_subtabs.tabs()[0])
+                root.update()
+                assert menu_state("Save plot…") == "disabled"
                 result_tabs.select(result_tabs.tabs()[0])
                 for geometry in ("1100x780", "1440x1040"):
                     root.geometry(geometry)
@@ -932,18 +954,23 @@ def check_gui(app, db_path, result):
                     if analysis_tabs.tab(page, "text") == "Clinical evaluation"
                 )
                 analysis_tabs.select(clinical_tab)
-                root.update_idletasks()
+                root.update()
                 clinical_widgets = list(children(root.nametowidget(clinical_tab)))
                 clinical_text = next(w for w in clinical_widgets if isinstance(w, tk.Text))
                 assert "Mean local control" in clinical_text.get("1.0", "end")
                 assert "Beta regression" in clinical_text.get("1.0", "end")
-                split = next(w for w in clinical_widgets if isinstance(w, ttk.Panedwindow))
-                analysis.update()
-                target = int(split.winfo_height() * 0.35)
-                assert split.winfo_height() > 180, split.winfo_height()
-                split.sashpos(0, target)
-                root.update_idletasks()
-                assert abs(split.sashpos(0) - target) < 4, (split.sashpos(0), target)
+                clinical_subtabs = next(w for w in clinical_widgets if isinstance(w, ttk.Notebook))
+                assert [clinical_subtabs.tab(page, "text") for page in clinical_subtabs.tabs()] == [
+                    "Analysis", "Plot"
+                ]
+                assert clinical_text.winfo_ismapped()
+                assert not any(isinstance(w, ttk.Panedwindow) for w in clinical_widgets)
+                assert menu_state("Save plot…", analysis) == "disabled"
+                assert menu_state("Print plot…", analysis) == "disabled"
+                clinical_subtabs.select(clinical_subtabs.tabs()[1])
+                root.update()
+                assert not clinical_text.winfo_ismapped()
+                assert button("Export clinical evaluation plot…", analysis).winfo_ismapped()
                 assert menu_state("Save plot…", analysis) == "normal"
                 assert menu_state("Print plot…", analysis) == "normal"
                 save_path = Path(db_path).with_name("saved-clinical.pdf")
@@ -963,6 +990,12 @@ def check_gui(app, db_path, result):
                     assert printed.read_bytes().startswith(b"%PDF")
                     printed.unlink()
                     printed.parent.rmdir()
+                clinical_subtabs.select(clinical_subtabs.tabs()[0])
+                root.update()
+                assert menu_state("Save plot…", analysis) == "disabled"
+                assert menu_state("Print plot…", analysis) == "disabled"
+                clinical_subtabs.select(clinical_subtabs.tabs()[1])
+                root.update()
                 table_tab = next(
                     page for page in analysis_tabs.tabs()
                     if analysis_tabs.tab(page, "text") == "Prescription values"

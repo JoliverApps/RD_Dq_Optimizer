@@ -2712,14 +2712,14 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
     ttk.Entry(options_bar, textvariable=reference_var, width=9).pack(side="left")
     ttk.Button(options_bar, text="Apply", command=redraw).pack(side="left", padx=5)
 
-    clinical_controls = ttk.Frame(clinical_page)
+    clinical_tabs = ttk.Notebook(clinical_page)
+    clinical_tabs.pack(fill="both", expand=True)
+    clinical_information = ttk.Frame(clinical_tabs, padding=6)
+    clinical_plot = ttk.Frame(clinical_tabs, padding=6)
+    clinical_tabs.add(clinical_information, text="Analysis")
+    clinical_tabs.add(clinical_plot, text="Plot")
+    clinical_controls = ttk.Frame(clinical_plot)
     clinical_controls.pack(fill="x", pady=(0, 6))
-    clinical_panes = ttk.Panedwindow(clinical_page, orient="vertical")
-    clinical_panes.pack(fill="both", expand=True)
-    clinical_information = ttk.LabelFrame(clinical_panes, text="Analysis", padding=6)
-    clinical_plot = ttk.Frame(clinical_panes)
-    clinical_panes.add(clinical_information, weight=0)
-    clinical_panes.add(clinical_plot, weight=1)
     clinical_text = tk.Text(clinical_information, height=9, wrap="word", borderwidth=0,
                             background="#eef2f6", foreground="#172b4d", state="disabled")
     clinical_scroll = ttk.Scrollbar(clinical_information, command=clinical_text.yview)
@@ -3093,7 +3093,8 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
         page = tabs.select()
         if page == str(plot_page):
             return "dispersion"
-        if page == str(clinical_page) and current()["clinical"] is not None:
+        if (page == str(clinical_page) and clinical_tabs.select() == str(clinical_plot)
+                and current()["clinical"] is not None):
             return "clinical"
         return None
 
@@ -3136,11 +3137,14 @@ def open_analysis_window(parent, result, *, container=None, tabs=None):
             messagebox.showerror("Print plot", str(exc), parent=window)
 
     def update_plot_actions(_event=None):
-        if not embedded:
+        if embedded:
+            tabs.event_generate("<<NotebookTabChanged>>", when="tail")
+        else:
             state = "normal" if selected_plot() is not None else "disabled"
             analysis_file.entryconfigure("Save plot…", state=state)
             analysis_file.entryconfigure("Print plot…", state=state)
 
+    clinical_tabs.bind("<<NotebookTabChanged>>", update_plot_actions, add="+")
     selector.bind("<<ComboboxSelected>>", select_set)
     if embedded:
         toolbar.pack_forget()
