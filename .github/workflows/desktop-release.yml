@@ -99,7 +99,7 @@ jobs:
         run: |
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
           tag="v$version"
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json url --jq .url; then
+          if [[ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" == "false" ]]; then
             exit 0
           fi
           cd release
@@ -110,12 +110,27 @@ jobs:
             RD_EQD2_Optimizer-Linux-x86_64.tar.gz
           )
           sha256sum "${assets[@]}" > SHA256SUMS.txt
-          gh release create "$tag" "${assets[@]}" SHA256SUMS.txt \
-            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "RD EQD2 Optimizer $tag" \
-            --notes "Desktop packages for version $version. See the repository README for usage and export options."
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --draft \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "RD EQD2 Optimizer $tag" \
+              --notes "Desktop packages for version $version. See the repository README for usage and export options."
+          fi
+          for asset in "${assets[@]}" SHA256SUMS.txt; do
+            for attempt in 1 2 3; do
+              if gh release upload "$tag" "$asset" --clobber --repo "$GITHUB_REPOSITORY"; then
+                break
+              fi
+              if [[ "$attempt" == "3" ]]; then
+                exit 1
+              fi
+              sleep 10
+            done
+          done
+          gh release edit "$tag" --draft=false --latest --repo "$GITHUB_REPOSITORY"
 
       - name: Remove merged branches for the workspace release
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -130,6 +145,7 @@ jobs:
             codex/visual-refresh
             codex/workspace-tabs
             codex/release-publishing
+            codex/release-cleanup
           )
           for branch in "${branches[@]}"; do
             if ! branch_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq .object.sha 2>/dev/null); then
