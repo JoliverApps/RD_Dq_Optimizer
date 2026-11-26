@@ -703,10 +703,46 @@ def check_progress_dialog(app, root):
     import threading
     import tkinter as tk
     from tkinter import ttk
+    from unittest.mock import patch
 
     main_thread = threading.get_ident()
     previous_close = root.protocol("WM_DELETE_WINDOW")
     errors = []
+
+    def run_progress(parent, title, work):
+        # Model Windows' disabled-window state on every platform and verify that
+        # all owners are enabled before the active modal is destroyed.
+        disabled = {}
+        original_attributes = tk.Wm.attributes
+        original_destroy = tk.Toplevel.destroy
+        destroyed = []
+
+        def attributes(window, *args, **kwargs):
+            if args and args[0] == "-disabled":
+                if len(args) == 1:
+                    return disabled.get(window, False)
+                disabled[window] = bool(args[1])
+                return None
+            return original_attributes(window, *args, **kwargs)
+
+        def destroy(window):
+            if window.title() == title:
+                destroyed.append(True)
+                if any(disabled.values()):
+                    errors.append("Progress modal destroyed before enabling its owners")
+            return original_destroy(window)
+
+        try:
+            with patch.object(tk.Wm, "attributes", attributes), \
+                    patch.object(tk.Toplevel, "destroy", destroy):
+                return app.run_with_progress(parent, title, work)
+        finally:
+            assert destroyed and not any(disabled.values()) and not errors, errors
+
+    focus = ttk.Entry(root)
+    focus.place(x=0, y=0)
+    root.update()
+    focus.focus_force()
 
     def children(widget):
         for child in widget.winfo_children():
@@ -748,7 +784,8 @@ def check_progress_dialog(app, root):
             gate.set()
 
     root.after(100, observe)
-    assert app.run_with_progress(root, "Test progress", work) == "finished"
+    assert run_progress(root, "Test progress", work) == "finished"
+    assert root.focus_get() is focus
     assert worker_ids[0] != main_thread and not errors, errors
     assert not root._calculation_active and root.grab_current() is None
     assert root.protocol("WM_DELETE_WINDOW") == previous_close
@@ -756,29 +793,42 @@ def check_progress_dialog(app, root):
     gate.clear()
     root.after(100, lambda: observe(cancel=True))
     try:
-        app.run_with_progress(root, "Test cancellation", work)
+        run_progress(root, "Test cancellation", work)
     except app.CalculationCancelled:
         pass
     else:
         raise AssertionError("Cancel applied a worker's partial result")
     assert not errors and not root._calculation_active, errors
     assert root.protocol("WM_DELETE_WINDOW") == previous_close
+    assert root.focus_get() is focus
 
     owner = tk.Toplevel(root)
+    owner_focus = ttk.Entry(owner)
+    owner_focus.pack()
     owner.update()
     owner.grab_set()
     try:
+        gate.clear()
+        owner_focus.focus_force()
+        root.after(100, observe)
+        assert run_progress(owner_focus, "Test nested progress", work) == "finished"
+        assert root.grab_current() is owner and root.focus_get() is owner_focus
+
         def fail(report):
             raise ValueError("Test failure")
-        try:
-            app.run_with_progress(owner, "Test failure", fail)
-        except ValueError as exc:
-            assert str(exc) == "Test failure"
-        else:
-            raise AssertionError("Worker error was swallowed")
+        # Even if focus has left the app, return to the initiating secondary window.
+        with patch.object(root, "focus_get", return_value=None):
+            try:
+                run_progress(owner, "Test failure", fail)
+            except ValueError as exc:
+                assert str(exc) == "Test failure"
+            else:
+                raise AssertionError("Worker error was swallowed")
         assert root.grab_current() is owner and not root._calculation_active
+        assert root.focus_get().winfo_toplevel() is owner
     finally:
         owner.destroy()
+        focus.destroy()
 
 
 def check_gui(app, db_path, result):

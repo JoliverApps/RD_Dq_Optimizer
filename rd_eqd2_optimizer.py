@@ -2695,7 +2695,8 @@ def run_with_progress(parent, title, work):
     import tkinter as tk
     from tkinter import ttk
 
-    root = parent.winfo_toplevel()._root()
+    owner = parent.winfo_toplevel()
+    root = owner._root()
     if getattr(root, "_calculation_active", False):
         raise CalculationCancelled("Another calculation is already running.")
     root._calculation_active = True
@@ -2707,8 +2708,10 @@ def run_with_progress(parent, title, work):
     blocked = []
     timer = None
     dialog = tk.Toplevel(parent)
+    complete = tk.BooleanVar(master=dialog, value=False)
+    dialog.bind("<Destroy>", lambda event: complete.set(True) if event.widget is dialog else None)
     dialog.title(title)
-    dialog.transient(parent.winfo_toplevel())
+    dialog.transient(owner)
     dialog.resizable(False, False)
     body = ttk.Frame(dialog, padding=20)
     body.pack(fill="both", expand=True)
@@ -2755,7 +2758,8 @@ def run_with_progress(parent, title, work):
             if not cancelled.is_set() and "error" not in state:
                 progress.configure(value=100)
                 percent.set("100%")
-            dialog.destroy()
+            # Keep the modal alive until its disabled owners can be re-enabled.
+            complete.set(True)
             return
         if not cancelled.is_set():
             with lock:
@@ -2773,7 +2777,6 @@ def run_with_progress(parent, title, work):
 
     try:
         dialog.update_idletasks()
-        owner = parent.winfo_toplevel()
         x = max(0, owner.winfo_rootx() + (owner.winfo_width() - dialog.winfo_width()) // 2)
         y = max(0, owner.winfo_rooty() + (owner.winfo_height() - dialog.winfo_height()) // 2)
         dialog.geometry(f"+{x}+{y}")
@@ -2793,7 +2796,7 @@ def run_with_progress(parent, title, work):
         cancel_button.focus_set()
         threading.Thread(target=calculate, daemon=True, name="RD calculation").start()
         timer = dialog.after(0, poll)
-        parent.wait_window(dialog)
+        parent.wait_variable(complete)
     finally:
         if not finished.is_set():
             cancelled.set()
@@ -2811,12 +2814,21 @@ def run_with_progress(parent, title, work):
             except tk.TclError:
                 pass
         if dialog.winfo_exists():
+            dialog.grab_release()
             dialog.destroy()
         root._calculation_active = False
         if previous_grab is not None and previous_grab.winfo_exists():
             previous_grab.grab_set()
-        if previous_focus is not None and previous_focus.winfo_exists():
-            previous_focus.focus_set()
+        # On Windows, destroying a modal with a disabled owner can activate an
+        # unrelated application. Restore the initiating window after enabling it.
+        try:
+            owner.lift()
+            owner.focus_force()
+            if (previous_focus is not None and previous_focus.winfo_exists()
+                    and previous_focus.winfo_toplevel() is owner):
+                previous_focus.focus_set()
+        except tk.TclError:
+            pass  # The owner may have been closed during application shutdown.
     if "error" in state:
         raise state["error"]
     if cancelled.is_set() or not finished.is_set() or "result" not in state:
